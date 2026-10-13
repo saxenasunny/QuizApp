@@ -1,0 +1,1144 @@
+/* ============================================================
+   Coding Arena — SPA (hash router, no framework)
+   ============================================================ */
+'use strict';
+
+/* ---------------- helpers ---------------- */
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function api(path, { method = 'GET', body } = {}) {
+  const res = await fetch(path, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = {};
+  try { data = await res.json(); } catch { /* empty body */ }
+  if (!res.ok) {
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.code = data.code;
+    throw err;
+  }
+  return data;
+}
+
+function toast(msg, kind = 'info') {
+  const root = $('#toast-root');
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  el.innerHTML = `<span>${kind === 'success' ? '✅' : kind === 'error' ? '⚠️' : '💡'}</span><span>${esc(msg)}</span>`;
+  root.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .4s'; setTimeout(() => el.remove(), 400); }, 4200);
+}
+
+const fmtDate = (d) => new Date(d).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const fmtDateFull = (d) => new Date(d).toLocaleString([], { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const fmtSecs = (s) => `${Math.floor(s / 60)}m ${s % 60}s`;
+const initials = (name) => String(name || '?').split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+const medal = (r) => (r === 1 ? '🥇' : r === 2 ? '🥈' : r === 3 ? '🥉' : `#${r}`);
+
+function timeLeftStr(ms) {
+  if (ms <= 0) return '00:00:00';
+  const t = Math.floor(ms / 1000);
+  const h = String(Math.floor(t / 3600)).padStart(2, '0');
+  const m = String(Math.floor((t % 3600) / 60)).padStart(2, '0');
+  const s = String(t % 60).padStart(2, '0');
+  return `${h}:${m}:${s}`;
+}
+
+function toLocalInput(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/* ---------------- global state ---------------- */
+let ME = null; // current user
+let quizState = null; // active quiz player state
+let quizTimer = null;
+
+/* ============================================================
+   NAVBAR
+   ============================================================ */
+function renderNav(active = '') {
+  const nav = $('#navbar');
+  if (!ME) { nav.classList.add('hidden'); nav.innerHTML = ''; return; }
+  nav.classList.remove('hidden');
+  const links = [
+    { href: '#/dashboard', label: '🏠 Competitions' },
+    { href: '#/leaderboard', label: '🏆 Leaderboards' },
+    { href: '#/overall', label: '🌍 Overall Ranking' },
+  ];
+  if (ME.role === 'admin') links.push({ href: '#/admin', label: '🛠️ Admin Panel' });
+  nav.innerHTML = `
+    <div class="navbar-inner">
+      <div class="logo" onclick="location.hash='#/dashboard'"><span class="logo-icon">⚔️</span> Coding<span class="grad-text">Arena</span></div>
+      <div class="nav-links">
+        ${links.map((l) => `<a class="nav-link ${active === l.href ? 'active' : ''}" href="${l.href}">${l.label}</a>`).join('')}
+      </div>
+      <div class="nav-right">
+        <div class="nav-user">
+          <b>${esc(ME.name || ME.email)}</b>
+          <span>${ME.role === 'admin' ? 'Administrator' : esc(ME.program_name || 'Student')}</span>
+        </div>
+        <div class="avatar" title="Profile" onclick="location.hash='#/profile'">${esc(initials(ME.name || ME.email))}</div>
+        <button class="btn btn-ghost btn-sm" onclick="logout()">Logout</button>
+      </div>
+    </div>`;
+}
+
+async function logout() {
+  try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
+  ME = null;
+  location.hash = '#/login';
+}
+
+/* ============================================================
+   AUTH VIEWS
+   ============================================================ */
+function authHero() {
+  return `
+    <div class="auth-hero">
+      <h1>Compete. Code. <span class="grad-text">Climb the ranks.</span></h1>
+      <p class="tagline">Coding Arena is your campus platform for live programming competitions — objective quizzes and real output-based coding tasks, scored instantly, ranked globally.</p>
+      <ul class="feature-list">
+        <li><span class="ico">⚡</span><span><b>Live competitions</b>Join events created by your admin and compete in real time.</span></li>
+        <li><span class="ico">💻</span><span><b>Two question types</b>Objective MCQs + practical output-based code challenges you actually write code for.</span></li>
+        <li><span class="ico">🏅</span><span><b>Rankings everywhere</b>Per-competition ranks plus an overall campus leaderboard.</span></li>
+      </ul>
+      <div class="code-demo">
+        <span class="c">// your journey</span><br/>
+        <span class="k">const</span> you = <span class="f">register</span>();<br/>
+        you.<span class="f">completeProfile</span>();<br/>
+        you.<span class="f">compete</span>(<span class="s">'CodeSprint'</span>);<br/>
+        you.<span class="f">rank</span> = <span class="s">'#1'</span>; <span class="caret"></span>
+      </div>
+    </div>`;
+}
+
+function viewLogin() {
+  renderNav();
+  $('#app').innerHTML = `
+    <div class="auth-wrap page-enter">
+      ${authHero()}
+      <div class="card auth-form">
+        <h2>Welcome back 👋</h2>
+        <p class="muted" style="margin-top:-4px;font-size:14px">Log in to continue your coding journey.</p>
+        <form id="login-form" style="margin-top:18px">
+          <div class="field">
+            <label>Email (your user ID) <span class="req">*</span></label>
+            <input class="input" type="email" name="email" placeholder="you@student.campus.edu" required />
+          </div>
+          <div class="field">
+            <label>Password <span class="req">*</span></label>
+            <input class="input" type="password" name="password" placeholder="••••••••" required />
+          </div>
+          <button class="btn btn-primary btn-block" type="submit">Log In →</button>
+        </form>
+        <p class="muted" style="font-size:13.5px;margin-top:16px">New student? <a class="link" href="#/register">Create an account</a></p>
+        <div class="demo-box">
+          <b>Demo accounts</b><br/>
+          👨‍🎓 Student: <code data-fill="aarav@student.campus.edu">aarav@student.campus.edu</code> / <code data-fill="demo1234">demo1234</code><br/>
+          🛠️ Admin: <code data-fill="admin@codingarena.dev">admin@codingarena.dev</code> / <code data-fill="admin123">admin123</code>
+        </div>
+      </div>
+    </div>`;
+  $$('.demo-box code').forEach((c) => c.addEventListener('click', () => {
+    navigator.clipboard?.writeText(c.textContent).then(() => toast('Copied: ' + c.textContent));
+  }));
+  $('#login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    try {
+      const { user } = await api('/api/auth/login', { method: 'POST', body: { email: f.get('email'), password: f.get('password') } });
+      ME = user;
+      toast(`Welcome back, ${user.name || user.email}!`, 'success');
+      location.hash = user.role === 'admin' ? '#/admin' : '#/dashboard';
+    } catch (err) { toast(err.message, 'error'); }
+  });
+}
+
+function viewRegister() {
+  renderNav();
+  const f = (name, label, type = 'text', req = true, placeholder = '') => `
+    <div class="field">
+      <label>${label}${req ? ' <span class="req">*</span>' : ''}</label>
+      <input class="input" type="${type}" name="${name}" placeholder="${placeholder}" ${req ? 'required' : ''} />
+    </div>`;
+  $('#app').innerHTML = `
+    <div class="auth-wrap page-enter">
+      ${authHero()}
+      <div class="card auth-form">
+        <h2>Create your account 🚀</h2>
+        <p class="muted" style="margin-top:-4px;font-size:14px">Your <b>email is your user ID</b>. Fill in your academic details — they appear on your leaderboard profile.</p>
+        <form id="reg-form" style="margin-top:16px">
+          <div class="form-row">${f('name', 'Full Name')}${f('email', 'Email (User ID)', 'email')}</div>
+          <div class="field">
+            <label>Password <span class="req">*</span></label>
+            <input class="input" type="password" name="password" minlength="6" placeholder="Minimum 6 characters" required />
+          </div>
+          <div class="form-row">${f('enrollment_no', 'Enrollment No.')}${f('admission_no', 'Admission No.')}</div>
+          ${f('school_name', 'School / Faculty Name', 'text', true, 'e.g. School of Computer Science')}
+          <div class="form-row">
+            ${f('program_name', 'Program Name', 'text', true, 'e.g. B.Tech CSE')}
+            <div class="form-row">
+              ${f('section', 'Section', 'text', true, 'A')}
+              ${f('batch_year', 'Batch Year', 'text', true, '2024')}
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" type="submit" style="margin-top:6px">Create Account &amp; Login →</button>
+        </form>
+        <p class="muted" style="font-size:13.5px;margin-top:14px">Already registered? <a class="link" href="#/login">Log in</a></p>
+      </div>
+    </div>`;
+  $('#reg-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      const { user } = await api('/api/auth/register', { method: 'POST', body: fd });
+      ME = user;
+      toast('Account created — welcome to Coding Arena! 🎉', 'success');
+      location.hash = '#/dashboard';
+    } catch (err) { toast(err.message, 'error'); }
+  });
+}
+
+/* ============================================================
+   STUDENT DASHBOARD
+   ============================================================ */
+function statusBadge(status) {
+  if (status === 'live') return '<span class="badge badge-live"><span class="pulse-dot"></span> Live now</span>';
+  if (status === 'upcoming') return '<span class="badge badge-upcoming">⏳ Upcoming</span>';
+  return '<span class="badge badge-ended">✔ Ended</span>';
+}
+
+function viewDashboard() {
+  renderNav('#/dashboard');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  Promise.all([api('/api/competitions'), api('/api/rankings/overall'), api('/api/me/participations')])
+    .then(([comps, overall, parts]) => {
+      const myOverall = overall.me;
+      const incomplete = !ME.profile_complete;
+      const liveCount = comps.competitions.filter((c) => c.status === 'live').length;
+
+      const cards = comps.competitions.map((c) => {
+        let action = '';
+        if (c.status === 'upcoming') {
+          action = c.registered
+            ? '<button class="btn btn-ghost btn-sm" disabled>✓ Registered</button>'
+            : `<button class="btn btn-primary btn-sm" onclick="registerComp(${c.id})">Register Now</button>`;
+        } else if (c.status === 'live') {
+          if (c.my_attempt) {
+            action = `<button class="btn btn-ghost btn-sm" onclick="location.hash='#/result-comp/${c.id}'">View Result (${c.my_attempt.score} pts)</button>`;
+          } else if (c.registered) {
+            action = `<button class="btn btn-primary btn-sm" onclick="location.hash='#/quiz/${c.id}'">▶ Start Quiz</button>`;
+          } else {
+            action = `<button class="btn btn-primary btn-sm" onclick="registerComp(${c.id}, true)">Register &amp; Play</button>`;
+          }
+        } else {
+          action = c.my_attempt
+            ? `<button class="btn btn-ghost btn-sm" onclick="location.hash='#/result-comp/${c.id}'">View Result (${c.my_attempt.score} pts)</button>`
+            : '<button class="btn btn-ghost btn-sm" disabled>Missed</button>';
+        }
+        const when = c.status === 'live'
+          ? `<span class="chip">⏳ closes in <span class="countdown" data-end="${esc(c.ends_at)}">…</span></span>`
+          : `<span class="chip">🗓 ${fmtDate(c.starts_at)}</span>`;
+        return `
+          <div class="card hoverable comp-card">
+            <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+              ${statusBadge(c.status)}
+              ${c.my_rank ? `<span class="badge badge-info">${medal(c.my_rank)} rank</span>` : ''}
+            </div>
+            <h3 class="comp-title">${esc(c.title)}</h3>
+            <p class="comp-desc">${esc(c.description || 'No description provided.')}</p>
+            <div class="comp-meta">
+              <span class="chip">❓ ${c.question_count} questions</span>
+              <span class="chip">🎯 ${c.total_points} pts</span>
+              <span class="chip">⏱ ${c.duration_minutes} min</span>
+              <span class="chip">👥 ${c.participant_count} participants</span>
+              ${when}
+            </div>
+            <div class="comp-actions">
+              ${action}
+              <button class="btn btn-ghost btn-sm" onclick="location.hash='#/leaderboard/${c.id}'">Leaderboard</button>
+            </div>
+          </div>`;
+      }).join('');
+
+      const partsRows = parts.participations.map((p) => `
+        <tr>
+          <td><b>${esc(p.title)}</b></td>
+          <td>${statusBadge(p.status)}</td>
+          <td class="score-cell">${p.score}</td>
+          <td>${p.correct_count}/${p.total_questions}</td>
+          <td class="rank-num ${p.rank <= 3 ? 'rank-' + p.rank : ''}">${medal(p.rank)} <span class="faint">of ${p.participants}</span></td>
+          <td><button class="btn btn-ghost btn-sm" onclick="location.hash='#/result-comp/${p.id}'">Review</button></td>
+        </tr>`).join('');
+
+      $('#app').innerHTML = `
+        <div class="page-enter">
+          ${incomplete ? `
+            <div class="banner">
+              <span class="banner-ico">⚠️</span>
+              <div class="banner-body"><b>Your profile is incomplete.</b> Complete all academic details to participate in competitions.</div>
+              <button class="btn btn-primary btn-sm" onclick="location.hash='#/profile'">Complete Profile</button>
+            </div>` : ''}
+          <div class="section-head" style="margin-top:6px">
+            <div>
+              <h1>Hey ${esc((ME.name || '').split(' ')[0] || 'Coder')} 👋</h1>
+              <p class="muted">${liveCount > 0 ? `🔥 <b>${liveCount} competition${liveCount > 1 ? 's are' : ' is'} LIVE right now</b> — jump in!` : 'No live competitions right now — check back soon.'}</p>
+            </div>
+            <div class="grid grid-3" style="min-width:330px">
+              <div class="card stat-card"><div class="stat-val">${myOverall ? '#' + myOverall.rank : '—'}</div><div class="stat-label">Overall Rank</div></div>
+              <div class="card stat-card"><div class="stat-val">${myOverall ? myOverall.total_score : 0}</div><div class="stat-label">Total Points</div></div>
+              <div class="card stat-card"><div class="stat-val">${myOverall ? myOverall.avg_accuracy + '%' : '—'}</div><div class="stat-label">Avg Accuracy</div></div>
+            </div>
+          </div>
+
+          <div class="section-head"><h2>🎯 Competitions</h2></div>
+          ${comps.competitions.length ? `<div class="grid grid-2">${cards}</div>` : `
+            <div class="card empty-state"><div class="es-ico">📭</div>No competitions yet. Stay tuned!</div>`}
+
+          <div class="section-head"><h2>📜 My Participations</h2></div>
+          ${parts.participations.length ? `
+            <div class="table-wrap"><table class="lb">
+              <thead><tr><th>Competition</th><th>Status</th><th>Score</th><th>Correct</th><th>Your Rank</th><th></th></tr></thead>
+              <tbody>${partsRows}</tbody>
+            </table></div>` : `
+            <div class="card empty-state"><div class="es-ico">🚀</div>You haven't completed any competition yet. Your history will appear here.</div>`}
+        </div>`;
+      startCountdowns();
+    })
+    .catch((e) => { toast(e.message, 'error'); $('#app').innerHTML = `<div class="card empty-state">${esc(e.message)}</div>`; });
+}
+
+async function registerComp(id, playNow = false) {
+  try {
+    await api(`/api/competitions/${id}/register`, { method: 'POST' });
+    toast('Registered successfully! 🎉', 'success');
+    if (playNow) location.hash = `#/quiz/${id}`;
+    else viewDashboard();
+  } catch (err) {
+    if (err.code === 'PROFILE_INCOMPLETE') {
+      toast('Complete your profile first!', 'error');
+      location.hash = '#/profile';
+    } else toast(err.message, 'error');
+  }
+}
+
+function startCountdowns() {
+  $$('[data-end]').forEach((el) => {
+    const end = new Date(el.dataset.end).getTime();
+    const tick = () => {
+      const rem = end - Date.now();
+      el.textContent = rem > 0 ? timeLeftStr(rem) : 'closed';
+    };
+    tick();
+    setInterval(tick, 1000);
+  });
+}
+
+/* ============================================================
+   COMPETITION DETAIL
+   ============================================================ */
+function viewCompetition(id) {
+  renderNav('#/dashboard');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  api(`/api/competitions/${id}`).then(({ competition: c, leaderboard }) => {
+    const lbRows = leaderboard.slice(0, 5).map((r) => `
+      <tr class="${r.user_id === ME.id ? 'me-row' : ''}">
+        <td class="rank-num ${r.rank <= 3 ? 'rank-' + r.rank : ''}">${medal(r.rank)}</td>
+        <td><div class="user-cell"><div class="mini-avatar">${esc(initials(r.name))}</div>
+          <div><div class="uc-name">${esc(r.name)}${r.user_id === ME.id ? ' <span class="faint">(you)</span>' : ''}</div>
+          <div class="uc-sub">${esc(r.enrollment_no || '')} · ${esc(r.program_name || '')}</div></div></div></td>
+        <td class="score-cell">${r.score}</td>
+      </tr>`).join('');
+
+    let mainAction = '';
+    if (c.status === 'upcoming') {
+      mainAction = c.registered
+        ? '<button class="btn btn-ghost" disabled>✓ Registered — waiting for start</button>'
+        : `<button class="btn btn-primary" onclick="registerComp(${c.id})">Register for this Competition</button>`;
+    } else if (c.status === 'live') {
+      if (c.attempt && c.attempt.status === 'submitted') {
+        mainAction = `<button class="btn btn-primary" onclick="location.hash='#/result-comp/${c.id}'">View My Result</button>`;
+      } else {
+        mainAction = c.registered
+          ? `<button class="btn btn-primary" onclick="location.hash='#/quiz/${c.id}'">▶ Start Competition Now</button>`
+          : `<button class="btn btn-primary" onclick="registerComp(${c.id}, true)">Register &amp; Start</button>`;
+      }
+    } else {
+      mainAction = c.attempt && c.attempt.status === 'submitted'
+        ? `<button class="btn btn-primary" onclick="location.hash='#/result-comp/${c.id}'">View My Result</button>`
+        : '<button class="btn btn-ghost" disabled>Competition ended</button>';
+    }
+
+    $('#app').innerHTML = `
+      <div class="page-enter">
+        <a class="link" href="#/dashboard">← Back to competitions</a>
+        <div class="card" style="margin-top:14px">
+          <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center">
+            ${statusBadge(c.status)}
+            ${c.my_rank ? `<span class="badge badge-info">Your rank: ${medal(c.my_rank)} of ${c.participant_count}</span>` : ''}
+          </div>
+          <h1 style="margin-top:12px">${esc(c.title)}</h1>
+          <p class="muted" style="line-height:1.7;max-width:760px">${esc(c.description)}</p>
+          <div class="details-grid">
+            <div class="detail-box"><div class="db-label">Starts</div><div class="db-value">${fmtDateFull(c.starts_at)}</div></div>
+            <div class="detail-box"><div class="db-label">Ends</div><div class="db-value">${fmtDateFull(c.ends_at)}</div></div>
+            <div class="detail-box"><div class="db-label">Duration</div><div class="db-value">⏱ ${c.duration_minutes} minutes</div></div>
+            <div class="detail-box"><div class="db-label">Questions</div><div class="db-value">❓ ${c.question_count} (${c.total_points} pts)</div></div>
+            <div class="detail-box"><div class="db-label">Participants</div><div class="db-value">👥 ${c.participant_count}</div></div>
+          </div>
+          <div style="margin-top:8px">${mainAction}</div>
+        </div>
+
+        <div class="grid grid-2" style="margin-top:18px">
+          <div class="card">
+            <h2>🏆 Top contestants</h2>
+            ${leaderboard.length ? `<div class="table-wrap"><table class="lb">
+              <thead><tr><th>Rank</th><th>Student</th><th>Score</th></tr></thead>
+              <tbody>${lbRows}</tbody></table></div>
+              <button class="btn btn-ghost btn-sm" style="margin-top:14px" onclick="location.hash='#/leaderboard/${c.id}'">Full leaderboard →</button>`
+              : '<div class="empty-state"><div class="es-ico">🧭</div>No submissions yet — be the first!</div>'}
+          </div>
+          <div class="card">
+            <h2>📖 How it works</h2>
+            <details class="faq"><summary>Objective questions</summary><p class="muted">Multiple-choice questions graded instantly and automatically.</p></details>
+            <details class="faq"><summary>Output-based (practical) questions</summary><p class="muted">You write real JavaScript in the editor. Your code is executed on the server and its output is compared with the expected output. Syntax errors and infinite loops are handled safely (2.5s limit).</p></details>
+            <details class="faq"><summary>Ranking rules</summary><p class="muted">Higher score wins. Ties are broken by faster completion time. Only your best submitted attempt counts.</p></details>
+          </div>
+        </div>
+      </div>`;
+  }).catch((e) => { toast(e.message, 'error'); location.hash = '#/dashboard'; });
+}
+
+/* ============================================================
+   QUIZ PLAYER
+   ============================================================ */
+function viewQuiz(compId) {
+  renderNav('#/dashboard');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  api(`/api/competitions/${compId}/start`, { method: 'POST' })
+    .then((data) => {
+      quizState = { compId, attempt: data.attempt, competition: data.competition, questions: data.questions, idx: 0, answers: {} };
+      renderQuiz();
+      if (quizTimer) clearInterval(quizTimer);
+      quizTimer = setInterval(() => {
+        const rem = quizState.attempt.deadline - Date.now();
+        const t = $('#quiz-timer');
+        if (t) {
+          t.textContent = timeLeftStr(rem);
+          t.classList.toggle('warn', rem < 60000);
+        }
+        if (rem <= 0 && quizState) {
+          clearInterval(quizTimer);
+          toast("Time's up! Auto-submitting…", 'error');
+          submitQuiz(true);
+        }
+      }, 1000);
+    })
+    .catch((e) => {
+      if (e.code === 'ALREADY_SUBMITTED') { location.hash = `#/result-comp/${compId}`; return; }
+      toast(e.message, 'error');
+      location.hash = `#/competition/${compId}`;
+    });
+}
+
+function renderQuiz() {
+  const s = quizState;
+  if (!s) return;
+  const q = s.questions[s.idx];
+  const answeredCount = s.questions.filter((x) => s.answers[x.id] !== undefined && String(s.answers[x.id]).trim() !== '').length;
+  const dots = s.questions.map((x, i) => {
+    const answered = s.answers[x.id] !== undefined && String(s.answers[x.id]).trim() !== '';
+    return `<div class="q-dot ${answered ? 'answered' : ''} ${i === s.idx ? 'current' : ''}" onclick="goQ(${i})">${i + 1}</div>`;
+  }).join('');
+
+  let body = '';
+  if (q.type === 'mcq') {
+    body = q.options.map((opt, i) => `
+      <div class="option ${s.answers[q.id] === opt ? 'selected' : ''}" onclick="selectOption(${q.id}, ${i})">
+        <div class="opt-key">${String.fromCharCode(65 + i)}</div>
+        <div>${esc(opt)}</div>
+      </div>`).join('');
+  } else {
+    body = `
+      <p class="muted" style="font-size:13.5px;margin:-8px 0 12px">✍️ Write your solution in JavaScript. Use <span class="mono">console.log()</span> to print the output. Code is executed on the server when you press <b>Run</b> or <b>Submit</b>.</p>
+      <div class="code-area">
+        <textarea class="code-editor" id="code-editor" spellcheck="false" oninput="saveCode(${q.id})">${esc(s.answers[q.id] ?? q.starter_code ?? '')}</textarea>
+        <div style="display:flex;gap:10px;margin-top:11px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" id="run-btn" onclick="runCode(${q.id})">▶ Run Code</button>
+          <span class="faint" style="align-self:center">Output is compared with the expected output (ignoring case &amp; extra spaces).</span>
+        </div>
+        <div class="console-out hidden" id="console-out"></div>
+      </div>`;
+  }
+
+  $('#app').innerHTML = `
+    <div class="page-enter">
+      <div class="quiz-top">
+        <div>
+          <b style="font-size:15px">${esc(s.competition.title)}</b>
+          <div class="faint">Question ${s.idx + 1} of ${s.questions.length} · ${answeredCount} answered</div>
+        </div>
+        <div class="timer" id="quiz-timer">${timeLeftStr(s.attempt.deadline - Date.now())}</div>
+        <div class="q-dots">${dots}</div>
+        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="submitQuiz(false)">📤 Submit Quiz</button>
+      </div>
+
+      <div class="card q-body">
+        <span class="badge ${q.type === 'mcq' ? 'badge-info' : 'badge-upcoming'}">${q.type === 'mcq' ? '🎯 Objective' : '💻 Practical · Output based'} · ${q.points} pts</span>
+        <div class="q-prompt">${esc(q.prompt)}</div>
+        ${body}
+        <div class="quiz-nav">
+          <button class="btn btn-ghost" ${s.idx === 0 ? 'disabled' : ''} onclick="goQ(${s.idx - 1})">← Previous</button>
+          ${s.idx === s.questions.length - 1
+            ? '<button class="btn btn-primary" onclick="submitQuiz(false)">📤 Submit Quiz</button>'
+            : `<button class="btn btn-primary" onclick="goQ(${s.idx + 1})">Next →</button>`}
+        </div>
+      </div>
+    </div>`;
+}
+
+function goQ(i) {
+  if (!quizState) return;
+  saveCurrentCode();
+  quizState.idx = Math.max(0, Math.min(quizState.questions.length - 1, i));
+  renderQuiz();
+}
+
+function selectOption(qid, optIdx) {
+  const q = quizState.questions.find((x) => x.id === qid);
+  quizState.answers[qid] = q.options[optIdx];
+  renderQuiz();
+}
+
+function saveCode(qid) {
+  const ed = $('#code-editor');
+  if (ed) quizState.answers[qid] = ed.value;
+}
+
+function saveCurrentCode() {
+  const q = quizState.questions[quizState.idx];
+  if (q.type === 'output') saveCode(q.id);
+}
+
+async function runCode(qid) {
+  saveCurrentCode();
+  const btn = $('#run-btn');
+  const out = $('#console-out');
+  const code = quizState.answers[qid] || '';
+  btn.disabled = true; btn.textContent = '⏳ Running…';
+  out.classList.remove('hidden', 'ok', 'err');
+  out.textContent = 'Running your code…';
+  try {
+    const r = await api('/api/run', { method: 'POST', body: { code } });
+    if (r.ok) {
+      out.classList.add('ok');
+      out.textContent = '✔ Finished successfully\n\n' + (r.stdout || '(no output — did you forget console.log?)');
+    } else {
+      out.classList.add('err');
+      out.textContent = '✖ Error\n\n' + (r.error || 'Runtime error');
+    }
+  } catch (e) {
+    out.classList.add('err');
+    out.textContent = e.message;
+  }
+  btn.disabled = false; btn.textContent = '▶ Run Code';
+}
+
+async function submitQuiz(auto = false) {
+  if (!quizState) return;
+  saveCurrentCode();
+  const s = quizState;
+  const unanswered = s.questions.filter((x) => s.answers[x.id] === undefined || String(s.answers[x.id]).trim() === '').length;
+  if (!auto) {
+    const msg = unanswered > 0
+      ? `${unanswered} question(s) unanswered. Submit anyway?`
+      : 'Submit your quiz? You cannot change answers afterwards.';
+    if (!confirm(msg)) return;
+  }
+  try {
+    const r = await api(`/api/attempts/${s.attempt.id}/submit`, { method: 'POST', body: { answers: s.answers } });
+    quizState = null;
+    clearInterval(quizTimer);
+    toast(`Submitted! You scored ${r.result.score} points.`, 'success');
+    location.hash = `#/result/${s.attempt.id}`;
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+/* ============================================================
+   RESULT
+   ============================================================ */
+function ringSvg(pct) {
+  const r = 72, c = 2 * Math.PI * r;
+  const off = c - (pct / 100) * c;
+  return `
+    <svg width="168" height="168" viewBox="0 0 168 168">
+      <circle cx="84" cy="84" r="${r}" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="12"/>
+      <circle cx="84" cy="84" r="${r}" fill="none" stroke="url(#g1)" stroke-width="12" stroke-linecap="round"
+        stroke-dasharray="${c}" stroke-dashoffset="${off}" style="transition:stroke-dashoffset 1s ease"/>
+      <defs><linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="#22d3ee"/><stop offset="60%" stop-color="#8b5cf6"/><stop offset="100%" stop-color="#f472b6"/>
+      </linearGradient></defs>
+    </svg>`;
+}
+
+function viewResult(attemptId) {
+  renderNav('#/dashboard');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  api(`/api/attempts/${attemptId}/result`).then(({ attempt, details, rank, participants }) => {
+    const totalPts = details.reduce((a, d) => a + d.points, 0);
+    const pct = totalPts ? Math.round((attempt.score / totalPts) * 100) : 0;
+    const reviews = details.map((d, i) => `
+      <div class="review-item ${d.correct ? 'ok' : 'bad'}">
+        <div class="rv-head">
+          <span>${d.correct ? '✅' : '❌'}</span>
+          <span>Q${i + 1}. ${esc(d.prompt.slice(0, 120))}${d.prompt.length > 120 ? '…' : ''}</span>
+          <span class="badge ${d.correct ? 'badge-live' : 'badge-ended'}" style="margin-left:auto">${d.correct ? '+' + d.points : '0'} pts</span>
+        </div>
+        <div class="rv-detail">
+          ${d.type === 'mcq'
+            ? `Your answer: <b>${esc(d.given || '(not answered)')}</b><br/>Correct answer: <b>${esc(d.answer)}</b>`
+            : `Expected output: <b>${esc(d.answer)}</b><br/>Your submitted code:<pre>${esc(d.given || '(not answered)')}</pre>`}
+        </div>
+      </div>`).join('');
+
+    const verdict = pct >= 70 ? '🔥 Outstanding performance!' : pct >= 40 ? '👍 Good effort — keep training!' : '💪 Practice makes perfect — try again!';
+    $('#app').innerHTML = `
+      <div class="page-enter">
+        <div class="card result-hero">
+          <div class="ring-wrap">${ringSvg(pct)}
+            <div class="ring-label"><div><div class="rl-val">${attempt.score}<span class="faint" style="font-size:17px">/${totalPts}</span></div>
+            <div class="rl-sub">${attempt.correct_count}/${attempt.total_questions} correct</div></div></div>
+          </div>
+          <div class="verdict grad-text">${verdict}</div>
+          <p class="muted" style="margin-top:6px">You finished <b style="color:var(--text)">${medal(rank)}</b> out of <b style="color:var(--text)">${participants}</b> in <span class="mono">${esc(attempt.competition_title)}</span> · Time: <span class="mono">${fmtSecs(attempt.duration_seconds)}</span></p>
+          <div style="display:flex;gap:12px;justify-content:center;margin-top:18px;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="location.hash='#/leaderboard/${attempt.competition_id}'">🏆 View Leaderboard</button>
+            <button class="btn btn-ghost" onclick="location.hash='#/dashboard'">Back to Competitions</button>
+          </div>
+        </div>
+        <div class="section-head"><h2>📋 Answer Review</h2></div>
+        ${reviews || '<div class="card empty-state">No answers recorded.</div>'}
+      </div>`;
+    if (rank <= 3 || pct >= 70) confettiBurst();
+  }).catch((e) => { toast(e.message, 'error'); location.hash = '#/dashboard'; });
+}
+
+/* lightweight confetti */
+function confettiBurst() {
+  const cv = document.createElement('canvas');
+  cv.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:300';
+  cv.width = innerWidth; cv.height = innerHeight;
+  document.body.appendChild(cv);
+  const ctx = cv.getContext('2d');
+  const colors = ['#22d3ee', '#8b5cf6', '#f472b6', '#34d399', '#fbbf24'];
+  const parts = Array.from({ length: 130 }, () => ({
+    x: innerWidth / 2 + (Math.random() - 0.5) * 300, y: innerHeight * 0.32,
+    vx: (Math.random() - 0.5) * 11, vy: Math.random() * -11 - 3,
+    s: Math.random() * 7 + 4, c: colors[(Math.random() * colors.length) | 0], a: Math.random() * Math.PI,
+  }));
+  let frames = 0;
+  (function draw() {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    parts.forEach((p) => {
+      p.vy += 0.28; p.x += p.vx; p.y += p.vy; p.a += 0.15;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.a); ctx.fillStyle = p.c;
+      ctx.fillRect(-p.s / 2, -p.s / 2, p.s, p.s * 0.6); ctx.restore();
+    });
+    if (++frames < 170) requestAnimationFrame(draw);
+    else cv.remove();
+  })();
+}
+
+/* ============================================================
+   LEADERBOARDS
+   ============================================================ */
+function viewLeaderboardPicker() {
+  renderNav('#/leaderboard');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  api('/api/competitions').then(({ competitions }) => {
+    const cards = competitions.map((c) => `
+      <div class="card hoverable comp-card" onclick="location.hash='#/leaderboard/${c.id}'" style="cursor:pointer">
+        ${statusBadge(c.status)}
+        <h3 class="comp-title">${esc(c.title)}</h3>
+        <div class="comp-meta">
+          <span class="chip">👥 ${c.participant_count} participants</span>
+          ${c.my_rank ? `<span class="chip" style="color:var(--cyan)">Your rank: ${medal(c.my_rank)}</span>` : '<span class="chip">Not participated</span>'}
+        </div>
+        <button class="btn btn-ghost btn-sm">View leaderboard →</button>
+      </div>`).join('');
+    $('#app').innerHTML = `
+      <div class="page-enter">
+        <h1>🏆 Competition Leaderboards</h1>
+        <p class="muted" style="margin-bottom:22px">Pick a competition to see its live rankings.</p>
+        <div class="grid grid-3">${cards}</div>
+        <div style="margin-top:22px">
+          <button class="btn btn-primary" onclick="location.hash='#/overall'">🌍 See Overall Campus Ranking →</button>
+        </div>
+      </div>`;
+  }).catch((e) => toast(e.message, 'error'));
+}
+
+function podiumHtml(leaderboard) {
+  const top = leaderboard.slice(0, 3);
+  if (top.length < 3) return '';
+  const order = [1, 0, 2]; // 2nd, 1st, 3rd
+  return `<div class="podium">${order.map((i) => {
+    const r = top[i];
+    return `<div class="p-col p-${r.rank}">
+      <div class="p-medal">${medal(r.rank)}</div>
+      <div class="p-name">${esc(r.name)}</div>
+      <div class="p-score">${r.score} pts</div>
+      <div class="p-block"></div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function viewLeaderboard(compId) {
+  renderNav('#/leaderboard');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  api(`/api/rankings/competition/${compId}`).then(({ competition: c, leaderboard, me }) => {
+    const rows = leaderboard.map((r) => `
+      <tr class="${r.user_id === ME.id ? 'me-row' : ''}">
+        <td class="rank-num ${r.rank <= 3 ? 'rank-' + r.rank : ''}">${medal(r.rank)}</td>
+        <td><div class="user-cell"><div class="mini-avatar">${esc(initials(r.name))}</div>
+          <div><div class="uc-name">${esc(r.name)}${r.user_id === ME.id ? ' <span class="faint">(you)</span>' : ''}</div>
+          <div class="uc-sub">${esc(r.enrollment_no || '')} · ${esc(r.program_name || '')} · ${esc(r.school_name || '')}</div></div></div></td>
+        <td class="faint">${esc(r.section || '')} · ${esc(r.batch_year || '')}</td>
+        <td class="score-cell">${r.score}</td>
+        <td>${r.correct_count}/${r.total_questions}</td>
+        <td class="mono faint">${fmtSecs(r.duration_seconds)}</td>
+      </tr>`).join('');
+    $('#app').innerHTML = `
+      <div class="page-enter">
+        <a class="link" href="#/leaderboard">← All leaderboards</a>
+        <div class="section-head" style="margin-top:10px">
+          <div><h1>🏆 ${esc(c.title)}</h1><p class="muted">${statusBadge(c.status)} &nbsp; ${leaderboard.length} participants ${me ? `· your rank: <b style="color:var(--cyan)">${medal(me.rank)}</b>` : ''}</p></div>
+          <button class="btn btn-ghost" onclick="location.hash='#/overall'">🌍 Overall ranking</button>
+        </div>
+        ${podiumHtml(leaderboard)}
+        ${leaderboard.length ? `
+          <div class="table-wrap" style="margin-top:18px"><table class="lb">
+            <thead><tr><th>Rank</th><th>Student</th><th>Section / Batch</th><th>Score</th><th>Correct</th><th>Time</th></tr></thead>
+            <tbody>${rows}</tbody></table></div>`
+          : '<div class="card empty-state"><div class="es-ico">📭</div>No submissions yet.</div>'}
+      </div>`;
+  }).catch((e) => { toast(e.message, 'error'); location.hash = '#/leaderboard'; });
+}
+
+function viewOverall() {
+  renderNav('#/overall');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  api('/api/rankings/overall').then(({ leaderboard, me }) => {
+    const rows = leaderboard.map((r) => `
+      <tr class="${r.user_id === ME.id ? 'me-row' : ''}">
+        <td class="rank-num ${r.rank <= 3 ? 'rank-' + r.rank : ''}">${medal(r.rank)}</td>
+        <td><div class="user-cell"><div class="mini-avatar">${esc(initials(r.name))}</div>
+          <div><div class="uc-name">${esc(r.name)}${r.user_id === ME.id ? ' <span class="faint">(you)</span>' : ''}</div>
+          <div class="uc-sub">${esc(r.email)}</div></div></div></td>
+        <td class="faint">${esc(r.enrollment_no || '')}</td>
+        <td class="faint">${esc(r.school_name || '')}<br/><span class="faint">${esc(r.program_name || '')} · Sec ${esc(r.section || '-')} · Batch ${esc(r.batch_year || '-')}</span></td>
+        <td>${r.competitions_attempted}</td>
+        <td class="faint">${r.avg_accuracy ?? '—'}%</td>
+        <td class="score-cell">${r.total_score}</td>
+      </tr>`).join('');
+    $('#app').innerHTML = `
+      <div class="page-enter">
+        <div class="section-head" style="margin-top:6px">
+          <div><h1>🌍 Overall Campus Ranking</h1>
+          <p class="muted">Total points earned across all competitions. ${me ? `You are ranked <b style="color:var(--cyan)">${medal(me.rank)}</b> with <b style="color:var(--text)">${me.total_score}</b> points.` : ''}</p></div>
+        </div>
+        ${podiumHtml(leaderboard)}
+        ${leaderboard.length ? `
+          <div class="table-wrap" style="margin-top:18px"><table class="lb">
+            <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Points</th></tr></thead>
+            <tbody>${rows}</tbody></table></div>`
+          : '<div class="card empty-state"><div class="es-ico">📭</div>Rankings appear once students start competing.</div>'}
+      </div>`;
+  }).catch((e) => toast(e.message, 'error'));
+}
+
+/* ============================================================
+   PROFILE
+   ============================================================ */
+function viewProfile() {
+  renderNav('#/profile');
+  const f = (name, label, val, ph = '') => `
+    <div class="field"><label>${label}</label>
+    <input class="input" name="${name}" value="${esc(val || '')}" placeholder="${ph}" /></div>`;
+  $('#app').innerHTML = `
+    <div class="page-enter" style="max-width:760px;margin:0 auto">
+      <h1>👤 My Profile</h1>
+      <p class="muted" style="margin-bottom:20px">Your email <b style="color:var(--cyan)">${esc(ME.email)}</b> is your user ID and cannot be changed.</p>
+      ${!ME.profile_complete ? `
+        <div class="banner"><span class="banner-ico">⚠️</span>
+        <div class="banner-body"><b>Complete all fields</b> — a full profile is required to participate in competitions.</div></div>` : ''}
+      <div class="card">
+        <form id="profile-form">
+          ${f('name', 'Full Name <span class="req">*</span>', ME.name)}
+          <div class="form-row">${f('enrollment_no', 'Enrollment No. <span class="req">*</span>', ME.enrollment_no, 'e.g. ENR2023001')}${f('admission_no', 'Admission No. <span class="req">*</span>', ME.admission_no, 'e.g. ADM1001')}</div>
+          ${f('school_name', 'School / Faculty Name <span class="req">*</span>', ME.school_name, 'e.g. School of Computer Science')}
+          <div class="form-row">${f('program_name', 'Program Name <span class="req">*</span>', ME.program_name, 'e.g. B.Tech CSE')}
+          <div class="form-row">${f('section', 'Section <span class="req">*</span>', ME.section, 'A')}${f('batch_year', 'Batch Year <span class="req">*</span>', ME.batch_year, '2024')}</div></div>
+          <hr class="divider"/>
+          <h3>🔒 Change password <span class="faint">(leave blank to keep current)</span></h3>
+          <div class="field"><label>New password</label><input class="input" type="password" name="password" minlength="6" placeholder="Minimum 6 characters" /></div>
+          <button class="btn btn-primary" type="submit">Save Profile</button>
+        </form>
+      </div>
+    </div>`;
+  $('#profile-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = Object.fromEntries(new FormData(e.target).entries());
+    try {
+      const { user } = await api('/api/profile', { method: 'PUT', body: fd });
+      ME = user;
+      toast('Profile saved! ✅', 'success');
+      location.hash = '#/dashboard';
+    } catch (err) { toast(err.message, 'error'); }
+  });
+}
+
+/* ============================================================
+   ADMIN PANEL
+   ============================================================ */
+function viewAdmin() {
+  renderNav('#/admin');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  Promise.all([api('/api/admin/overview'), api('/api/admin/competitions')]).then(([ov, comps]) => {
+    const rows = comps.competitions.map((c) => `
+      <tr>
+        <td><b>${esc(c.title)}</b><div class="faint">${esc(c.description || '').slice(0, 80)}</div></td>
+        <td>${statusBadge(c.status)}</td>
+        <td>${c.question_count} <span class="faint">(${c.total_points} pts)</span></td>
+        <td>${c.registration_count}</td>
+        <td>${c.participant_count}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="location.hash='#/admin/edit/${c.id}'">Edit</button>
+          <button class="btn btn-ghost btn-sm" onclick="location.hash='#/leaderboard/${c.id}'">Rankings</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteComp(${c.id}, '${esc(c.title).replace(/'/g, "\\'")}')">Delete</button>
+        </td>
+      </tr>`).join('');
+    $('#app').innerHTML = `
+      <div class="page-enter">
+        <div class="section-head" style="margin-top:6px">
+          <div><h1>🛠️ Admin Panel</h1><p class="muted">Create coding competitions and monitor every ranking.</p></div>
+          <button class="btn btn-primary" onclick="location.hash='#/admin/new'">＋ Create Competition</button>
+        </div>
+        <div class="grid grid-4">
+          <div class="card stat-card"><div class="stat-val">${ov.students}</div><div class="stat-label">Students</div></div>
+          <div class="card stat-card"><div class="stat-val">${ov.competitions}</div><div class="stat-label">Competitions</div></div>
+          <div class="card stat-card"><div class="stat-val">${ov.live}</div><div class="stat-label">Live Now</div></div>
+          <div class="card stat-card"><div class="stat-val">${ov.attempts}</div><div class="stat-label">Submissions</div></div>
+        </div>
+
+        <div class="section-head"><h2>🎯 Competitions</h2>
+          <button class="btn btn-ghost btn-sm" onclick="location.hash='#/admin/students'">👥 View all students →</button></div>
+        ${comps.competitions.length ? `
+          <div class="table-wrap"><table class="lb">
+            <thead><tr><th>Title</th><th>Status</th><th>Questions</th><th>Registered</th><th>Submitted</th><th>Actions</th></tr></thead>
+            <tbody>${rows}</tbody></table></div>`
+          : '<div class="card empty-state"><div class="es-ico">📭</div>No competitions yet — create your first one!</div>'}
+
+        <div class="section-head"><h2>🌍 Overall Ranking (all students)</h2>
+          <button class="btn btn-ghost btn-sm" onclick="location.hash='#/overall'">Open full page →</button></div>
+        <div id="admin-overall"></div>
+      </div>`;
+    return api('/api/rankings/overall');
+  }).then(({ leaderboard }) => {
+    const el = $('#admin-overall');
+    if (!el) return;
+    el.innerHTML = `<div class="table-wrap"><table class="lb">
+      <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Total Points</th></tr></thead>
+      <tbody>${leaderboard.map((r) => `
+        <tr><td class="rank-num ${r.rank <= 3 ? 'rank-' + r.rank : ''}">${medal(r.rank)}</td>
+        <td><div class="user-cell"><div class="mini-avatar">${esc(initials(r.name))}</div>
+          <div><div class="uc-name">${esc(r.name)}</div><div class="uc-sub">${esc(r.email)}</div></div></div></td>
+        <td class="faint">${esc(r.enrollment_no || '')}</td>
+        <td class="faint">${esc(r.school_name || '')} · ${esc(r.program_name || '')}</td>
+        <td>${r.competitions_attempted}</td>
+        <td class="score-cell">${r.total_score}</td></tr>`).join('')}
+      </tbody></table></div>`;
+  }).catch((e) => {
+    toast(e.message, 'error');
+    if (e.code === 'FORBIDDEN') location.hash = '#/dashboard';
+  });
+}
+
+async function deleteComp(id, title) {
+  if (!confirm(`Delete "${title}"? This cannot be undone.`)) return;
+  try {
+    await api(`/api/admin/competitions/${id}`, { method: 'DELETE' });
+    toast('Competition deleted.', 'success');
+    viewAdmin();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function viewAdminStudents() {
+  renderNav('#/admin');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  api('/api/admin/students').then(({ students }) => {
+    const rows = students.map((s) => `
+      <tr>
+        <td><div class="user-cell"><div class="mini-avatar">${esc(initials(s.name))}</div>
+          <div><div class="uc-name">${esc(s.name)}</div><div class="uc-sub">${esc(s.email)}</div></div></div></td>
+        <td class="faint">${esc(s.enrollment_no || '—')}<br/>${esc(s.admission_no || '')}</td>
+        <td class="faint">${esc(s.school_name || '—')}</td>
+        <td class="faint">${esc(s.program_name || '—')} · Sec ${esc(s.section || '-')} · Batch ${esc(s.batch_year || '-')}</td>
+        <td><span class="badge ${s.profile_complete ? 'badge-live' : 'badge-upcoming'}">${s.profile_complete ? 'Complete' : 'Incomplete'}</span></td>
+        <td>${s.stats.competitions_attempted}</td>
+        <td class="score-cell">${s.stats.total_score}</td>
+        <td class="rank-num">${s.stats.rank ? medal(s.stats.rank) : '—'}</td>
+      </tr>`).join('');
+    $('#app').innerHTML = `
+      <div class="page-enter">
+        <a class="link" href="#/admin">← Admin panel</a>
+        <h1 style="margin-top:10px">👥 All Students</h1>
+        <p class="muted" style="margin-bottom:18px">${students.length} registered students with their overall performance.</p>
+        <div class="table-wrap"><table class="lb">
+          <thead><tr><th>Student</th><th>Enrollment / Admission</th><th>School</th><th>Program</th><th>Profile</th><th>Competitions</th><th>Points</th><th>Rank</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+      </div>`;
+  }).catch((e) => { toast(e.message, 'error'); location.hash = '#/admin'; });
+}
+
+/* ---------- competition builder (create / edit) ---------- */
+let qbQuestions = [];
+
+function viewAdminNewComp() {
+  renderNav('#/admin');
+  qbQuestions = [
+    { type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10 },
+  ];
+  renderCompForm({ title: '', description: '', starts_at: toLocalInput(new Date(Date.now() + 3600e3)), ends_at: toLocalInput(new Date(Date.now() + 4 * 3600e3)), duration_minutes: 30 }, false);
+}
+
+function viewAdminEditComp(id) {
+  renderNav('#/admin');
+  $('#app').innerHTML = '<div class="spinner"></div>';
+  api(`/api/admin/competitions/${id}`).then(({ competition, questions }) => {
+    qbQuestions = questions.map((q) => ({
+      type: q.type, prompt: q.prompt,
+      options: q.options || ['', ''],
+      answer_index: q.options ? Math.max(0, q.options.indexOf(q.answer)) : 0,
+      answer: q.answer, starter_code: q.starter_code || '', points: q.points,
+    }));
+    if (!qbQuestions.length) qbQuestions.push({ type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10 });
+    renderCompForm({
+      title: competition.title, description: competition.description,
+      starts_at: toLocalInput(competition.starts_at), ends_at: toLocalInput(competition.ends_at),
+      duration_minutes: competition.duration_minutes,
+    }, true, competition);
+  }).catch((e) => { toast(e.message, 'error'); location.hash = '#/admin'; });
+}
+
+function renderCompForm(c, isEdit, comp = null) {
+  const locked = isEdit && comp && comp.participant_count > 0;
+  $('#app').innerHTML = `
+    <div class="page-enter" style="max-width:900px;margin:0 auto">
+      <a class="link" href="#/admin">← Admin panel</a>
+      <h1 style="margin-top:10px">${isEdit ? '✏️ Edit Competition' : '🎉 Create Competition'}</h1>
+      <p class="muted" style="margin-bottom:20px">Set the schedule, then add <b>Objective (MCQ)</b> and <b>Practical (output-based)</b> questions.</p>
+
+      <div class="card" style="margin-bottom:18px">
+        <h3>📅 Event Details</h3>
+        <div class="field"><label>Title <span class="req">*</span></label>
+          <input class="input" id="c-title" value="${esc(c.title)}" placeholder="e.g. CodeSprint: Python Basics" /></div>
+        <div class="field"><label>Description</label>
+          <textarea class="input" id="c-desc" placeholder="What is this competition about?">${esc(c.description)}</textarea></div>
+        <div class="form-row">
+          <div class="field"><label>Starts at <span class="req">*</span></label>
+            <input class="input" type="datetime-local" id="c-start" value="${esc(c.starts_at)}" /></div>
+          <div class="field"><label>Ends at <span class="req">*</span></label>
+            <input class="input" type="datetime-local" id="c-end" value="${esc(c.ends_at)}" /></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>Duration (minutes) <span class="req">*</span></label>
+            <input class="input" type="number" id="c-dur" min="1" max="480" value="${c.duration_minutes}" /></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:18px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+          <h3 style="margin:0">❓ Questions</h3>
+          ${locked ? '' : `
+            <div style="display:flex;gap:9px">
+              <button class="btn btn-ghost btn-sm" onclick="addQuestion('mcq')">＋ Objective (MCQ)</button>
+              <button class="btn btn-ghost btn-sm" onclick="addQuestion('output')">＋ Practical (output)</button>
+            </div>`}
+        </div>
+        ${locked ? '<p class="faint" style="margin-top:10px">Students have already attempted this competition — questions are locked, but you can still edit the schedule.</p>' : ''}
+        <div id="q-list" style="margin-top:14px"></div>
+      </div>
+
+      <button class="btn btn-primary btn-lg" style="padding:14px 28px;font-size:16px" onclick="saveComp(${isEdit ? comp.id : 'null'})">
+        ${isEdit ? '💾 Save Changes' : '🚀 Publish Competition'}
+      </button>
+    </div>`;
+  renderQList(!locked);
+}
+
+function syncQbFromDom() {
+  $$('.q-builder-item').forEach((el, i) => {
+    const q = qbQuestions[i];
+    if (!q) return;
+    q.prompt = $('.q-prompt-input', el)?.value ?? q.prompt;
+    q.points = parseInt($('.q-points', el)?.value, 10) || 10;
+    if (q.type === 'mcq') {
+      q.options = $$('.opt-input', el).map((o) => o.value);
+      const checked = $('.opt-radio:checked', el);
+      q.answer_index = checked ? parseInt(checked.value, 10) : 0;
+    } else {
+      q.answer = $('.q-answer-input', el)?.value ?? q.answer;
+      q.starter_code = $('.q-starter-input', el)?.value ?? q.starter_code;
+    }
+  });
+}
+
+function renderQList(editable = true) {
+  const list = $('#q-list');
+  if (!list) return;
+  list.innerHTML = qbQuestions.map((q, i) => {
+    const typeUi = q.type === 'mcq'
+      ? `
+        <div id="opts-${i}">
+          ${q.options.map((o, oi) => `
+            <div class="opt-row">
+              <input type="radio" class="opt-radio" name="correct-${i}" value="${oi}" ${q.answer_index === oi ? 'checked' : ''} ${editable ? '' : 'disabled'} />
+              <input class="input opt-input" value="${esc(o)}" placeholder="Option ${String.fromCharCode(65 + oi)}" ${editable ? '' : 'disabled'} />
+              ${editable && q.options.length > 2 ? `<button class="btn btn-danger btn-sm" onclick="removeOption(${i},${oi})">✕</button>` : ''}
+            </div>`).join('')}
+          ${editable ? `<button class="btn btn-ghost btn-sm" onclick="addOption(${i})">＋ Add option</button>
+          <p class="faint" style="margin:6px 0 0">Select the radio button next to the correct answer.</p>` : ''}
+        </div>`
+      : `
+        <div class="field"><label>Expected output <span class="req">*</span></label>
+          <input class="input mono q-answer-input" value="${esc(q.answer)}" placeholder="e.g. 55" ${editable ? '' : 'disabled'} /></div>
+        <div class="field"><label>Starter code shown to students</label>
+          <textarea class="code-editor q-starter-input" style="min-height:110px" placeholder="// code template" ${editable ? '' : 'disabled'}>${esc(q.starter_code)}</textarea></div>
+        <p class="faint">Students write JavaScript; your expected output is compared (ignoring case &amp; extra whitespace).</p>`;
+    return `
+      <div class="q-builder-item">
+        <div class="qb-head">
+          <b class="grad-text">Q${i + 1}</b>
+          <div class="type-toggle">
+            <button class="${q.type === 'mcq' ? 'on' : ''}" onclick="setType(${i},'mcq')" ${editable ? '' : 'disabled'}>🎯 Objective</button>
+            <button class="${q.type === 'output' ? 'on' : ''}" onclick="setType(${i},'output')" ${editable ? '' : 'disabled'}>💻 Practical</button>
+          </div>
+          <div style="margin-left:auto;display:flex;gap:9px;align-items:center">
+            <span class="faint">Points</span>
+            <input class="input q-points" type="number" min="1" max="100" value="${q.points}" style="width:78px" ${editable ? '' : 'disabled'} />
+            ${editable && qbQuestions.length > 1 ? `<button class="btn btn-danger btn-sm" onclick="removeQuestion(${i})">✕ Remove</button>` : ''}
+          </div>
+        </div>
+        <div class="field"><label>Question prompt <span class="req">*</span></label>
+          <textarea class="input q-prompt-input" style="min-height:64px" placeholder="Write the question…" ${editable ? '' : 'disabled'}>${esc(q.prompt)}</textarea></div>
+        ${typeUi}
+      </div>`;
+  }).join('');
+}
+
+function addQuestion(type) {
+  syncQbFromDom();
+  qbQuestions.push({ type, prompt: '', options: type === 'mcq' ? ['', ''] : undefined, answer_index: 0, answer: '', starter_code: '', points: 10 });
+  renderQList();
+}
+function removeQuestion(i) { syncQbFromDom(); qbQuestions.splice(i, 1); renderQList(); }
+function setType(i, type) {
+  syncQbFromDom();
+  const q = qbQuestions[i];
+  if (q.type === type) return;
+  q.type = type;
+  if (type === 'mcq' && !q.options) { q.options = ['', '']; q.answer_index = 0; }
+  renderQList();
+}
+function addOption(i) { syncQbFromDom(); qbQuestions[i].options.push(''); renderQList(); }
+function removeOption(i, oi) { syncQbFromDom(); qbQuestions[i].options.splice(oi, 1); qbQuestions[i].answer_index = 0; renderQList(); }
+
+async function saveComp(id) {
+  syncQbFromDom();
+  const body = {
+    title: $('#c-title').value,
+    description: $('#c-desc').value,
+    starts_at: $('#c-start').value,
+    ends_at: $('#c-end').value,
+    duration_minutes: $('#c-dur').value,
+    questions: qbQuestions,
+  };
+  try {
+    if (id) {
+      await api(`/api/admin/competitions/${id}`, { method: 'PUT', body });
+      toast('Competition updated! ✅', 'success');
+    } else {
+      await api('/api/admin/competitions', { method: 'POST', body });
+      toast('Competition published! 🎉', 'success');
+    }
+    location.hash = '#/admin';
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+/* ============================================================
+   ROUTER
+   ============================================================ */
+const routes = [
+  [/^#\/login$/, () => (ME ? (location.hash = ME.role === 'admin' ? '#/admin' : '#/dashboard') : viewLogin())],
+  [/^#\/register$/, () => (ME ? (location.hash = ME.role === 'admin' ? '#/admin' : '#/dashboard') : viewRegister())],
+  [/^#\/dashboard$/, () => viewDashboard()],
+  [/^#\/competition\/(\d+)$/, (m) => viewCompetition(m[1])],
+  [/^#\/quiz\/(\d+)$/, (m) => viewQuiz(m[1])],
+  [/^#\/result\/(\d+)$/, (m) => viewResult(m[1])],
+  [/^#\/result-comp\/(\d+)$/, (m) => viewResultByComp(m[1])],
+  [/^#\/leaderboard$/, () => viewLeaderboardPicker()],
+  [/^#\/leaderboard\/(\d+)$/, (m) => viewLeaderboard(m[1])],
+  [/^#\/overall$/, () => viewOverall()],
+  [/^#\/profile$/, () => viewProfile()],
+  [/^#\/admin$/, () => viewAdmin()],
+  [/^#\/admin\/new$/, () => viewAdminNewComp()],
+  [/^#\/admin\/edit\/(\d+)$/, (m) => viewAdminEditComp(m[1])],
+  [/^#\/admin\/students$/, () => viewAdminStudents()],
+];
+
+async function viewResultByComp(compId) {
+  try {
+    const { attempt } = await api(`/api/competitions/${compId}`);
+    if (attempt && attempt.status === 'submitted') location.replace(`#/result/${attempt.id}`);
+    else location.hash = `#/competition/${compId}`;
+  } catch { location.hash = '#/dashboard'; }
+}
+
+function router() {
+  if (quizTimer && !location.hash.startsWith('#/quiz/')) { clearInterval(quizTimer); quizTimer = null; }
+  const hash = location.hash || '#/login';
+  const path = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';
+
+  for (const [re, fn] of routes) {
+    const m = hash.match(re);
+    if (m) {
+      if (!ME && !/^#\/(login|register)$/.test(hash)) { location.hash = '#/login'; return; }
+      if (ME && /^#\/admin/.test(hash) && ME.role !== 'admin') { toast('Admin access only.', 'error'); location.hash = '#/dashboard'; return; }
+      fn(m);
+      return;
+    }
+  }
+  location.hash = path;
+}
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+(async function boot() {
+  try {
+    const { user } = await api('/api/auth/me');
+    ME = user;
+  } catch { ME = null; }
+  if (!location.hash || location.hash === '#/') location.hash = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';
+  window.addEventListener('hashchange', router);
+  router();
+})();
