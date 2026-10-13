@@ -49,9 +49,26 @@ function timeLeftStr(ms) {
 }
 
 function toLocalInput(iso) {
+  if (!iso) return '';
   const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function toIsoFromInput(val) {
+  if (!val) return '';
+  const parts = String(val).split('T');
+  if (parts.length !== 2) {
+    const d = new Date(val);
+    return isNaN(d.getTime()) ? '' : d.toISOString();
+  }
+  const [datePart, timePart] = parts;
+  const [y, m, d] = datePart.split('-').map(Number);
+  const [hh, mm] = timePart.split(':').map(Number);
+  if (!y || !m || !d || isNaN(hh) || isNaN(mm)) return '';
+  const dt = new Date(y, m - 1, d, hh, mm, 0, 0);
+  return isNaN(dt.getTime()) ? '' : dt.toISOString();
 }
 
 /* ---------------- global state ---------------- */
@@ -954,9 +971,9 @@ function renderCompForm(c, isEdit, comp = null) {
         <div class="field"><label>Description</label>
           <textarea class="input" id="c-desc" placeholder="What is this competition about?">${esc(c.description)}</textarea></div>
         <div class="form-row">
-          <div class="field"><label>Starts at <span class="req">*</span></label>
+          <div class="field"><label>Starts at (your local time) <span class="req">*</span></label>
             <input class="input" type="datetime-local" id="c-start" value="${esc(c.starts_at)}" /></div>
-          <div class="field"><label>Ends at <span class="req">*</span></label>
+          <div class="field"><label>Ends at (your local time) <span class="req">*</span></label>
             <input class="input" type="datetime-local" id="c-end" value="${esc(c.ends_at)}" /></div>
         </div>
         <div class="form-row">
@@ -1064,11 +1081,23 @@ function removeOption(i, oi) { syncQbFromDom(); qbQuestions[i].options.splice(oi
 
 async function saveComp(id) {
   syncQbFromDom();
+  const startRaw = $('#c-start').value;
+  const endRaw = $('#c-end').value;
+  if (!startRaw) { toast('Please specify a start date & time.', 'error'); return; }
+  if (!endRaw) { toast('Please specify an end date & time.', 'error'); return; }
+  const startsAt = toIsoFromInput(startRaw);
+  const endsAt = toIsoFromInput(endRaw);
+  if (!startsAt || !endsAt) { toast('Invalid start or end date/time.', 'error'); return; }
+  if (new Date(endsAt).getTime() <= new Date(startsAt).getTime()) {
+    toast('End time must be after start time.', 'error');
+    return;
+  }
+
   const body = {
     title: $('#c-title').value,
     description: $('#c-desc').value,
-    starts_at: $('#c-start').value,
-    ends_at: $('#c-end').value,
+    starts_at: startsAt,
+    ends_at: endsAt,
     duration_minutes: $('#c-dur').value,
     questions: qbQuestions,
   };
