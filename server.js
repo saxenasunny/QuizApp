@@ -16,10 +16,7 @@ const IS_VERCEL = !!process.env.VERCEL;
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
 app.use(express.json({ limit: '200kb' }));
-if (!IS_VERCEL) {
-  // On Vercel, static assets in public/ are served by the CDN, not express.
-  app.use(express.static(path.join(__dirname, 'public')));
-}
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Guarantee schema + seed are ready before any request is handled.
 // init() is memoized, so this is a no-op after the first call.
@@ -613,11 +610,9 @@ app.get('/api/admin/competitions/:id/submissions', requireAuth, requireAdmin, as
 /* ------------------------------------------------------------------ */
 /* SPA fallback (local only; on Vercel the CDN serves public/)         */
 /* ------------------------------------------------------------------ */
-if (!IS_VERCEL) {
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  });
-}
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // On Vercel, export the app. Locally, start listening.
 if (IS_VERCEL) {
