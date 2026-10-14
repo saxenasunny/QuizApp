@@ -8,20 +8,55 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  let data = {};
-  try { data = await res.json(); } catch { /* empty body */ }
-  if (!res.ok) {
-    const err = new Error(data.error || `Request failed (${res.status})`);
-    err.code = data.code;
-    throw err;
+const apiCache = new Map(); // path -> { data, time }
+const apiInflight = new Map(); // path -> Promise
+const API_CACHE_TTL_MS = 20000; // 20s client-side cache for GET
+
+async function api(path, { method = 'GET', body, bustCache = false } = {}) {
+  const m = method.toUpperCase();
+  const isGet = m === 'GET';
+  const isQuiz = path.includes('/quiz/');
+
+  if (isGet && !bustCache && !isQuiz) {
+    const cached = apiCache.get(path);
+    if (cached && (Date.now() - cached.time < API_CACHE_TTL_MS)) {
+      return cached.data;
+    }
+    if (apiInflight.has(path)) {
+      return apiInflight.get(path);
+    }
   }
-  return data;
+
+  const fetchPromise = (async () => {
+    try {
+      const res = await fetch(path, {
+        method: m,
+        headers: body ? { 'Content-Type': 'application/json' } : {},
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      let data = {};
+      try { data = await res.json(); } catch { /* empty body */ }
+      if (!res.ok) {
+        const err = new Error(data.error || `Request failed (${res.status})`);
+        err.code = data.code;
+        throw err;
+      }
+      if (isGet && !isQuiz) {
+        apiCache.set(path, { data, time: Date.now() });
+      } else if (!isGet) {
+        apiCache.clear(); // invalidate cache on mutations
+      }
+      return data;
+    } finally {
+      apiInflight.delete(path);
+    }
+  })();
+
+  if (isGet && !bustCache && !isQuiz) {
+    apiInflight.set(path, fetchPromise);
+  }
+
+  return fetchPromise;
 }
 
 function toast(msg, kind = 'info') {
@@ -135,6 +170,8 @@ function renderNav(active = '') {
 async function logout() {
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
   ME = null;
+  apiCache.clear();
+  try { localStorage.removeItem('coding_arena_user'); } catch {}
   location.hash = '#/login';
 }
 
@@ -197,6 +234,7 @@ function viewLogin() {
     try {
       const { user } = await api('/api/auth/login', { method: 'POST', body: { email: f.get('email'), password: f.get('password') } });
       ME = user;
+      try { localStorage.setItem('coding_arena_user', JSON.stringify(user)); } catch {}
       toast(`Welcome back, ${user.name || user.email}!`, 'success');
       location.hash = user.role === 'admin' ? '#/admin' : '#/dashboard';
     } catch (err) { toast(err.message, 'error'); }
@@ -242,6 +280,7 @@ function viewRegister() {
     try {
       const { user } = await api('/api/auth/register', { method: 'POST', body: fd });
       ME = user;
+      try { localStorage.setItem('coding_arena_user', JSON.stringify(user)); } catch {}
       toast('Account created — welcome to Coding Arena! 🎉', 'success');
       location.hash = '#/dashboard';
     } catch (err) { toast(err.message, 'error'); }
@@ -259,7 +298,9 @@ function statusBadge(status) {
 
 function viewDashboard() {
   renderNav('#/dashboard');
-  $('#app').innerHTML = '<div class="spinner"></div>';
+  if (!apiCache.has('/api/competitions')) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
   Promise.all([api('/api/competitions'), api('/api/rankings/overall'), api('/api/me/participations')])
     .then(([comps, overall, parts]) => {
       const myOverall = overall.me;
@@ -388,7 +429,9 @@ function startCountdowns() {
    ============================================================ */
 function viewCompetition(id) {
   renderNav('#/dashboard');
-  $('#app').innerHTML = '<div class="spinner"></div>';
+  if (!apiCache.has(`/api/competitions/${id}`)) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
   api(`/api/competitions/${id}`).then(({ competition: c, leaderboard }) => {
     const lbRows = leaderboard.slice(0, 5).map((r) => `
       <tr class="${r.user_id === ME.id ? 'me-row' : ''}">
@@ -658,7 +701,9 @@ function ringSvg(pct) {
 
 function viewResult(attemptId) {
   renderNav('#/dashboard');
-  $('#app').innerHTML = '<div class="spinner"></div>';
+  if (!apiCache.has(`/api/attempts/${attemptId}/result`)) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
   api(`/api/attempts/${attemptId}/result`).then(({ attempt, details, rank, participants }) => {
     const totalPts = details.reduce((a, d) => a + d.points, 0);
     const pct = totalPts ? Math.round((attempt.score / totalPts) * 100) : 0;
@@ -729,7 +774,9 @@ function confettiBurst() {
    ============================================================ */
 function viewLeaderboardPicker() {
   renderNav('#/leaderboard');
-  $('#app').innerHTML = '<div class="spinner"></div>';
+  if (!apiCache.has('/api/competitions')) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
   api('/api/competitions').then(({ competitions }) => {
     const cards = competitions.map((c) => `
       <div class="card hoverable comp-card" onclick="location.hash='#/leaderboard/${c.id}'" style="cursor:pointer">
@@ -771,7 +818,9 @@ function podiumHtml(leaderboard) {
 
 function viewLeaderboard(compId) {
   renderNav('#/leaderboard');
-  $('#app').innerHTML = '<div class="spinner"></div>';
+  if (!apiCache.has(`/api/rankings/competition/${compId}`)) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
   api(`/api/rankings/competition/${compId}`).then(({ competition: c, leaderboard, me }) => {
     const rows = leaderboard.map((r) => `
       <tr class="${r.user_id === ME.id ? 'me-row' : ''}">
@@ -803,7 +852,9 @@ function viewLeaderboard(compId) {
 
 function viewOverall() {
   renderNav('#/overall');
-  $('#app').innerHTML = '<div class="spinner"></div>';
+  if (!apiCache.has('/api/rankings/overall')) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
   api('/api/rankings/overall').then(({ leaderboard, me }) => {
     const rows = leaderboard.map((r) => `
       <tr class="${r.user_id === ME.id ? 'me-row' : ''}">
@@ -868,6 +919,7 @@ function viewProfile() {
     try {
       const { user } = await api('/api/profile', { method: 'PUT', body: fd });
       ME = user;
+      try { localStorage.setItem('coding_arena_user', JSON.stringify(user)); } catch {}
       toast('Profile saved! ✅', 'success');
       location.hash = '#/dashboard';
     } catch (err) { toast(err.message, 'error'); }
@@ -879,7 +931,9 @@ function viewProfile() {
    ============================================================ */
 function viewAdmin() {
   renderNav('#/admin');
-  $('#app').innerHTML = '<div class="spinner"></div>';
+  if (!apiCache.has('/api/admin/overview') || !apiCache.has('/api/admin/competitions')) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
   Promise.all([api('/api/admin/overview'), api('/api/admin/competitions')]).then(([ov, comps]) => {
     const rows = comps.competitions.map((c) => `
       <tr>
@@ -951,7 +1005,9 @@ async function deleteComp(id, title) {
 
 function viewAdminStudents() {
   renderNav('#/admin');
-  $('#app').innerHTML = '<div class="spinner"></div>';
+  if (!apiCache.has('/api/admin/students')) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
   api('/api/admin/students').then(({ students }) => {
     const rows = students.map((s) => `
       <tr>
@@ -1250,12 +1306,38 @@ function router() {
 /* ============================================================
    BOOT
    ============================================================ */
-(async function boot() {
+// 1. Immediately restore cached user session if present
+try {
+  const saved = localStorage.getItem('coding_arena_user');
+  if (saved) ME = JSON.parse(saved);
+} catch { ME = null; }
+
+// 2. Set initial hash and start router IMMEDIATELY (no blank screen!)
+if (!location.hash || location.hash === '#/') {
+  location.hash = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';
+}
+window.addEventListener('hashchange', router);
+router();
+
+// 3. Verify / refresh session in background without blocking UI
+(async function verifySession() {
   try {
-    const { user } = await api('/api/auth/me');
+    const { user } = await api('/api/auth/me', { bustCache: true });
+    const hadUser = Boolean(ME);
     ME = user;
-  } catch { ME = null; }
-  if (!location.hash || location.hash === '#/') location.hash = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';
-  window.addEventListener('hashchange', router);
-  router();
+    try { localStorage.setItem('coding_arena_user', JSON.stringify(user)); } catch {}
+    if (!hadUser && user) {
+      if (!location.hash || location.hash === '#/login' || location.hash === '#/register') {
+        location.hash = user.role === 'admin' ? '#/admin' : '#/dashboard';
+      } else {
+        router();
+      }
+    }
+  } catch {
+    if (ME) {
+      ME = null;
+      try { localStorage.removeItem('coding_arena_user'); } catch {}
+      location.hash = '#/login';
+    }
+  }
 })();

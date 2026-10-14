@@ -302,11 +302,20 @@ async function seed() {
 /* ------------------------------------------------------------------ */
 /* Init (memoized): create schema + seed once per process              */
 /* ------------------------------------------------------------------ */
+let isDbReady = false;
 let initPromise = null;
 async function init() {
+  if (isDbReady) return;
   if (initPromise) return initPromise;
   initPromise = (async () => {
     try {
+      try {
+        await client.execute('SELECT 1 FROM users LIMIT 1');
+        isDbReady = true;
+        return;
+      } catch {
+        // Table not initialized yet, run schema creation
+      }
       await client.executeMultiple(SCHEMA);
       try {
         await client.execute("ALTER TABLE questions ADD COLUMN language TEXT DEFAULT 'javascript'");
@@ -314,6 +323,7 @@ async function init() {
         // column already exists
       }
       await seed();
+      isDbReady = true;
     } catch (e) {
       initPromise = null; // allow retry on transient failure
       throw e;

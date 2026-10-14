@@ -31,8 +31,11 @@ app.use(async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* Session helpers                                                     */
+/* Session helpers (with fast in-memory cache)                         */
 /* ------------------------------------------------------------------ */
+const sessionCache = new Map(); // token -> { user, cachedAt }
+const SESSION_CACHE_TTL_MS = 60000; // 60s cache in memory
+
 function parseCookies(req) {
   const header = req.headers.cookie || '';
   const out = {};
@@ -46,24 +49,41 @@ function parseCookies(req) {
 async function currentUser(req) {
   const token = parseCookies(req).sid;
   if (!token) return null;
+  const now = Date.now();
+  const cached = sessionCache.get(token);
+  if (cached && (now - cached.cachedAt < SESSION_CACHE_TTL_MS)) {
+    return cached.user;
+  }
   const row = await db.prepare(`
     SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
     WHERE s.token = ? AND s.expires_at > ?
-  `).get(token, new Date().toISOString());
+  `).get(token, new Date(now).toISOString());
+  if (row) {
+    sessionCache.set(token, { user: row, cachedAt: now });
+  } else {
+    sessionCache.delete(token);
+  }
   return row || null;
 }
 
-async function createSession(res, userId) {
+async function createSession(res, userOrId) {
   const token = crypto.randomBytes(32).toString('hex');
   const now = Date.now();
+  const userId = typeof userOrId === 'object' ? userOrId.id : userOrId;
   await db.prepare('INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
     .run(token, userId, new Date(now).toISOString(), new Date(now + SESSION_TTL_MS).toISOString());
   res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`);
+  if (typeof userOrId === 'object') {
+    sessionCache.set(token, { user: userOrId, cachedAt: now });
+  }
 }
 
 async function destroySession(req, res) {
   const token = parseCookies(req).sid;
-  if (token) await db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  if (token) {
+    sessionCache.delete(token);
+    await db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  }
   res.setHeader('Set-Cookie', 'sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0');
 }
 
@@ -133,8 +153,8 @@ app.post('/api/auth/register', async (req, res) => {
   `).run(email, hashPassword(password), fields.name, fields.enrollment_no, fields.admission_no,
          fields.school_name, fields.program_name, fields.section, fields.batch_year, new Date().toISOString());
 
-  await createSession(res, r.lastInsertRowid);
   const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(r.lastInsertRowid);
+  await createSession(res, user);
   res.status(201).json({ user: publicUser(user) });
 });
 
@@ -145,7 +165,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user || !verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ error: 'Invalid email or password.' });
   }
-  await createSession(res, user.id);
+  await createSession(res, user);
   res.json({ user: publicUser(user) });
 });
 
@@ -181,6 +201,8 @@ app.put('/api/profile', requireAuth, async (req, res) => {
   `).run(next.name, next.enrollment_no, next.admission_no, next.school_name,
          next.program_name, next.section, next.batch_year, req.user.id);
   const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const token = parseCookies(req).sid;
+  if (token) sessionCache.set(token, { user, cachedAt: Date.now() });
   res.json({ user: publicUser(user) });
 });
 
@@ -317,37 +339,58 @@ async function overallLeaderboard() {
 }
 
 app.get('/api/competitions', requireAuth, async (req, res) => {
-  const comps = await db.prepare('SELECT * FROM competitions ORDER BY starts_at DESC').all();
-  const regs = (await db.prepare('SELECT competition_id FROM registrations WHERE user_id = ?').all(req.user.id)).map((r) => r.competition_id);
-  const atts = await db.prepare("SELECT competition_id, score, status FROM attempts WHERE user_id = ? AND status = 'submitted'").all(req.user.id);
-  const attMap = Object.fromEntries(atts.map((a) => [a.competition_id, a]));
+  const [comps, regs, atts, ranks] = await Promise.all([
+    db.prepare(`
+      SELECT c.*,
+             COALESCE(q.n, 0) AS question_count,
+             COALESCE(q.pts, 0) AS total_points,
+             COALESCE(att.n, 0) AS participant_count
+      FROM competitions c
+      LEFT JOIN (
+        SELECT competition_id, COUNT(*) AS n, SUM(points) AS pts
+        FROM questions GROUP BY competition_id
+      ) q ON q.competition_id = c.id
+      LEFT JOIN (
+        SELECT competition_id, COUNT(*) AS n
+        FROM attempts WHERE status = 'submitted' GROUP BY competition_id
+      ) att ON att.competition_id = c.id
+      ORDER BY c.starts_at DESC
+    `).all(),
+    db.prepare('SELECT competition_id FROM registrations WHERE user_id = ?').all(req.user.id),
+    db.prepare("SELECT competition_id, score, status FROM attempts WHERE user_id = ? AND status = 'submitted'").all(req.user.id),
+    db.prepare(`
+      SELECT competition_id, rank FROM (
+        SELECT competition_id, user_id,
+               RANK() OVER (PARTITION BY competition_id ORDER BY score DESC, duration_seconds ASC, submitted_at ASC) AS rank
+        FROM attempts WHERE status = 'submitted'
+      ) WHERE user_id = ?
+    `).all(req.user.id),
+  ]);
 
-  const data = [];
-  for (const c of comps) {
-    const q = await db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(points),0) AS pts FROM questions WHERE competition_id = ?').get(c.id);
-    const lb = await leaderboardFor(c.id);
-    const me = lb.find((r) => r.user_id === req.user.id);
-    data.push({
-      ...c,
-      status: competitionStatus(c),
-      question_count: q.n,
-      total_points: q.pts,
-      registered: regs.includes(c.id),
-      my_attempt: attMap[c.id] ? { score: attMap[c.id].score } : null,
-      my_rank: me ? me.rank : null,
-      participant_count: lb.length,
-    });
-  }
+  const regSet = new Set(regs.map((r) => r.competition_id));
+  const attMap = Object.fromEntries(atts.map((a) => [a.competition_id, a]));
+  const rankMap = Object.fromEntries(ranks.map((r) => [r.competition_id, r.rank]));
+
+  const data = comps.map((c) => ({
+    ...c,
+    status: competitionStatus(c),
+    registered: regSet.has(c.id),
+    my_attempt: attMap[c.id] ? { score: attMap[c.id].score } : null,
+    my_rank: rankMap[c.id] || null,
+  }));
   res.json({ competitions: data });
 });
 
 app.get('/api/competitions/:id', requireAuth, async (req, res) => {
-  const comp = await db.prepare('SELECT * FROM competitions WHERE id = ?').get(req.params.id);
+  const compId = req.params.id;
+  const comp = await db.prepare('SELECT * FROM competitions WHERE id = ?').get(compId);
   if (!comp) return res.status(404).json({ error: 'Competition not found.' });
-  const q = await db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(points),0) AS pts FROM questions WHERE competition_id = ?').get(comp.id);
-  const reg = await db.prepare('SELECT id FROM registrations WHERE competition_id = ? AND user_id = ?').get(comp.id, req.user.id);
-  const att = await db.prepare('SELECT * FROM attempts WHERE competition_id = ? AND user_id = ?').get(comp.id, req.user.id);
-  const lb = await leaderboardFor(comp.id);
+  const [q, reg, att, lb] = await Promise.all([
+    db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(points),0) AS pts FROM questions WHERE competition_id = ?').get(compId),
+    db.prepare('SELECT id FROM registrations WHERE competition_id = ? AND user_id = ?').get(compId, req.user.id),
+    db.prepare('SELECT * FROM attempts WHERE competition_id = ? AND user_id = ?').get(compId, req.user.id),
+    leaderboardFor(compId),
+  ]);
   const me = lb.find((r) => r.user_id === req.user.id);
   res.json({
     competition: {
@@ -519,17 +562,32 @@ app.get('/api/rankings/competition/:id', requireAuth, async (req, res) => {
 /* My participations with ranks */
 app.get('/api/me/participations', requireAuth, async (req, res) => {
   const rows = await db.prepare(`
-    SELECT c.id, c.title, c.starts_at, c.ends_at, a.score, a.submitted_at, a.total_questions, a.correct_count
-    FROM attempts a JOIN competitions c ON c.id = a.competition_id
+    SELECT 
+      c.id, c.title, c.starts_at, c.ends_at, 
+      a.score, a.submitted_at, a.total_questions, a.correct_count,
+      r.rank,
+      COALESCE(p.participants, 0) AS participants
+    FROM attempts a
+    JOIN competitions c ON c.id = a.competition_id
+    LEFT JOIN (
+      SELECT competition_id, user_id,
+             RANK() OVER (PARTITION BY competition_id ORDER BY score DESC, duration_seconds ASC, submitted_at ASC) AS rank
+      FROM attempts WHERE status = 'submitted'
+    ) r ON r.competition_id = a.competition_id AND r.user_id = a.user_id
+    LEFT JOIN (
+      SELECT competition_id, COUNT(*) AS participants
+      FROM attempts WHERE status = 'submitted'
+      GROUP BY competition_id
+    ) p ON p.competition_id = a.competition_id
     WHERE a.user_id = ? AND a.status = 'submitted'
     ORDER BY a.submitted_at DESC
   `).all(req.user.id);
-  const participations = [];
-  for (const r of rows) {
-    const lb = await leaderboardFor(r.id);
-    const me = lb.find((x) => x.user_id === req.user.id);
-    participations.push({ ...r, rank: me ? me.rank : null, participants: lb.length, status: competitionStatus(r) });
-  }
+  const participations = rows.map((r) => ({
+    ...r,
+    rank: r.rank || null,
+    participants: r.participants,
+    status: competitionStatus(r),
+  }));
   res.json({ participations });
 });
 
@@ -601,14 +659,32 @@ app.post('/api/admin/competitions', requireAuth, requireAdmin, async (req, res) 
 });
 
 app.get('/api/admin/competitions', requireAuth, requireAdmin, async (req, res) => {
-  const comps = await db.prepare('SELECT * FROM competitions ORDER BY starts_at DESC').all();
-  const data = [];
-  for (const c of comps) {
-    const qs = await db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(points),0) AS pts FROM questions WHERE competition_id = ?').get(c.id);
-    const participants = (await db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE competition_id = ? AND status = 'submitted'").get(c.id)).n;
-    const regs = (await db.prepare('SELECT COUNT(*) AS n FROM registrations WHERE competition_id = ?').get(c.id)).n;
-    data.push({ ...c, status: competitionStatus(c), question_count: qs.n, total_points: qs.pts, participant_count: participants, registration_count: regs });
-  }
+  const comps = await db.prepare(`
+    SELECT c.*,
+           COALESCE(q.n, 0) AS question_count,
+           COALESCE(q.pts, 0) AS total_points,
+           COALESCE(att.n, 0) AS participant_count,
+           COALESCE(reg.n, 0) AS registration_count
+    FROM competitions c
+    LEFT JOIN (
+      SELECT competition_id, COUNT(*) AS n, SUM(points) AS pts
+      FROM questions GROUP BY competition_id
+    ) q ON q.competition_id = c.id
+    LEFT JOIN (
+      SELECT competition_id, COUNT(*) AS n
+      FROM attempts WHERE status = 'submitted' GROUP BY competition_id
+    ) att ON att.competition_id = c.id
+    LEFT JOIN (
+      SELECT competition_id, COUNT(*) AS n
+      FROM registrations GROUP BY competition_id
+    ) reg ON reg.competition_id = c.id
+    ORDER BY c.starts_at DESC
+  `).all();
+
+  const data = comps.map((c) => ({
+    ...c,
+    status: competitionStatus(c),
+  }));
   res.json({ competitions: data });
 });
 
@@ -657,19 +733,26 @@ app.delete('/api/admin/competitions/:id', requireAuth, requireAdmin, async (req,
 });
 
 app.get('/api/admin/students', requireAuth, requireAdmin, async (req, res) => {
-  const overall = Object.fromEntries((await overallLeaderboard()).map((r) => [r.user_id, r]));
-  const srows = await db.prepare("SELECT * FROM users WHERE role = 'student' ORDER BY created_at DESC").all();
+  const [overallRows, srows] = await Promise.all([
+    overallLeaderboard(),
+    db.prepare("SELECT * FROM users WHERE role = 'student' ORDER BY created_at DESC").all(),
+  ]);
+  const overall = Object.fromEntries(overallRows.map((r) => [r.user_id, r]));
   const students = srows.map((u) => ({ ...publicUser(u), stats: overall[u.id] || { total_score: 0, competitions_attempted: 0, avg_accuracy: null, rank: null } }));
   res.json({ students });
 });
 
 app.get('/api/admin/overview', requireAuth, requireAdmin, async (req, res) => {
-  const students = (await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'student'").get()).n;
-  const comps = (await db.prepare('SELECT COUNT(*) AS n FROM competitions').get()).n;
-  const allComps = await db.prepare('SELECT * FROM competitions').all();
+  const [counts, allComps] = await Promise.all([
+    db.prepare(`
+      SELECT 
+        (SELECT COUNT(*) FROM users WHERE role = 'student') AS students,
+        (SELECT COUNT(*) FROM attempts WHERE status = 'submitted') AS attempts
+    `).get(),
+    db.prepare('SELECT starts_at, ends_at FROM competitions').all(),
+  ]);
   const live = allComps.filter((c) => competitionStatus(c) === 'live').length;
-  const attempts = (await db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE status = 'submitted'").get()).n;
-  res.json({ students, competitions: comps, live, attempts });
+  res.json({ students: counts.students, competitions: allComps.length, live, attempts: counts.attempts });
 });
 
 app.get('/api/admin/competitions/:id/submissions', requireAuth, requireAdmin, async (req, res) => {
