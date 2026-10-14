@@ -303,6 +303,7 @@ async function overallLeaderboard() {
   const rows = await db.prepare(`
     SELECT u.id AS user_id, u.name, u.email, u.enrollment_no, u.school_name, u.program_name, u.section, u.batch_year,
            SUM(a.score) AS total_score,
+           SUM(a.score) AS score,
            SUM(a.correct_count) AS total_correct,
            SUM(a.total_questions) AS total_questions,
            COUNT(a.id) AS competitions_attempted,

@@ -759,10 +759,11 @@ function podiumHtml(leaderboard) {
   const order = [1, 0, 2]; // 2nd, 1st, 3rd
   return `<div class="podium">${order.map((i) => {
     const r = top[i];
+    const pts = r.total_score !== undefined && r.total_score !== null ? r.total_score : (r.score ?? 0);
     return `<div class="p-col p-${r.rank}">
       <div class="p-medal">${medal(r.rank)}</div>
       <div class="p-name">${esc(r.name)}</div>
-      <div class="p-score">${r.score} pts</div>
+      <div class="p-score">${pts} pts</div>
       <div class="p-block"></div>
     </div>`;
   }).join('')}</div>`;
