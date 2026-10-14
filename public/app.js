@@ -71,6 +71,32 @@ function toIsoFromInput(val) {
   return isNaN(dt.getTime()) ? '' : dt.toISOString();
 }
 
+const SUPPORTED_LANGUAGES = [
+  { id: 'javascript', label: 'JavaScript (Node.js)', icon: '⚡' },
+  { id: 'python', label: 'Python 3', icon: '🐍' },
+  { id: 'c', label: 'C (GCC)', icon: '⚙️' },
+  { id: 'cpp', label: 'C++ (G++)', icon: '🚀' },
+  { id: 'java', label: 'Java (JDK)', icon: '☕' },
+];
+
+const DEFAULT_STARTER_CODE = {
+  javascript: '// Write your JavaScript solution\nconsole.log();\n',
+  python: '# Write your Python solution\nprint()\n',
+  c: '#include <stdio.h>\n\nint main() {\n    // Write your C solution\n    printf("");\n    return 0;\n}\n',
+  cpp: '#include <iostream>\n\nint main() {\n    // Write your C++ solution\n    std::cout << "";\n    return 0;\n}\n',
+  java: 'public class Main {\n    public static void main(String[] args) {\n        // Write your Java solution\n        System.out.println();\n    }\n}\n',
+};
+
+function getPrintHint(lang) {
+  switch (lang) {
+    case 'python': return 'print()';
+    case 'c': return 'printf()';
+    case 'cpp': return 'std::cout';
+    case 'java': return 'System.out.println()';
+    default: return 'console.log()';
+  }
+}
+
 /* ---------------- global state ---------------- */
 let ME = null; // current user
 let quizState = null; // active quiz player state
@@ -482,9 +508,20 @@ function renderQuiz() {
         <div>${esc(opt)}</div>
       </div>`).join('');
   } else {
+    const qLang = s.answers[`${q.id}_lang`] || q.language || 'javascript';
+    const langObj = SUPPORTED_LANGUAGES.find((l) => l.id === qLang) || SUPPORTED_LANGUAGES[0];
+    const printHint = getPrintHint(qLang);
     body = `
-      <p class="muted" style="font-size:13.5px;margin:-8px 0 12px">✍️ Write your solution in JavaScript. Use <span class="mono">console.log()</span> to print the output. Code is executed on the server when you press <b>Run</b> or <b>Submit</b>.</p>
+      <p class="muted" style="font-size:13.5px;margin:-8px 0 12px">✍️ Write your solution in <b>${langObj.label}</b>. Use <span class="mono">${printHint}</span> to print the output. Code is executed on the server when you press <b>Run</b> or <b>Submit</b>.</p>
       <div class="code-area">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="faint" style="font-size:12.5px">Language:</span>
+            <select class="input" style="padding:4px 10px;font-size:13px;width:auto;height:auto" id="quiz-lang-select" onchange="changeQuizLang(${q.id}, this.value)">
+              ${SUPPORTED_LANGUAGES.map((l) => `<option value="${l.id}" ${qLang === l.id ? 'selected' : ''}>${l.icon} ${l.label}</option>`).join('')}
+            </select>
+          </div>
+        </div>
         <textarea class="code-editor" id="code-editor" spellcheck="false" oninput="saveCode(${q.id})">${esc(s.answers[q.id] ?? q.starter_code ?? '')}</textarea>
         <div style="display:flex;gap:10px;margin-top:11px;flex-wrap:wrap">
           <button class="btn btn-ghost btn-sm" id="run-btn" onclick="runCode(${q.id})">▶ Run Code</button>
@@ -520,6 +557,18 @@ function renderQuiz() {
     </div>`;
 }
 
+function changeQuizLang(qid, newLang) {
+  if (!quizState) return;
+  saveCurrentCode();
+  const oldLang = quizState.answers[`${qid}_lang`] || quizState.questions.find((x) => x.id === qid)?.language || 'javascript';
+  quizState.answers[`${qid}_lang`] = newLang;
+  const currentCode = quizState.answers[qid];
+  if (!currentCode || currentCode === DEFAULT_STARTER_CODE[oldLang]) {
+    quizState.answers[qid] = DEFAULT_STARTER_CODE[newLang];
+  }
+  renderQuiz();
+}
+
 function goQ(i) {
   if (!quizState) return;
   saveCurrentCode();
@@ -548,14 +597,15 @@ async function runCode(qid) {
   const btn = $('#run-btn');
   const out = $('#console-out');
   const code = quizState.answers[qid] || '';
+  const language = quizState.answers[`${qid}_lang`] || quizState.questions[quizState.idx].language || 'javascript';
   btn.disabled = true; btn.textContent = '⏳ Running…';
   out.classList.remove('hidden', 'ok', 'err');
-  out.textContent = 'Running your code…';
+  out.textContent = `Running your ${language} code…`;
   try {
-    const r = await api('/api/run', { method: 'POST', body: { code } });
+    const r = await api('/api/run', { method: 'POST', body: { code, language } });
     if (r.ok) {
       out.classList.add('ok');
-      out.textContent = '✔ Finished successfully\n\n' + (r.stdout || '(no output — did you forget console.log?)');
+      out.textContent = '✔ Finished successfully\n\n' + (r.stdout || `(no output — did you forget ${getPrintHint(language)}?)`);
     } else {
       out.classList.add('err');
       out.textContent = '✖ Error\n\n' + (r.error || 'Runtime error');
@@ -929,10 +979,21 @@ function viewAdminStudents() {
 /* ---------- competition builder (create / edit) ---------- */
 let qbQuestions = [];
 
+function onLangChange(i, newLang) {
+  syncQbFromDom();
+  const q = qbQuestions[i];
+  const oldLang = q.language || 'javascript';
+  q.language = newLang;
+  if (!q.starter_code || q.starter_code.trim() === '' || q.starter_code === DEFAULT_STARTER_CODE[oldLang]) {
+    q.starter_code = DEFAULT_STARTER_CODE[newLang];
+  }
+  renderQList();
+}
+
 function viewAdminNewComp() {
   renderNav('#/admin');
   qbQuestions = [
-    { type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10 },
+    { type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10, language: 'javascript' },
   ];
   renderCompForm({ title: '', description: '', starts_at: toLocalInput(new Date(Date.now() + 3600e3)), ends_at: toLocalInput(new Date(Date.now() + 4 * 3600e3)), duration_minutes: 30 }, false);
 }
@@ -946,8 +1007,9 @@ function viewAdminEditComp(id) {
       options: q.options || ['', ''],
       answer_index: q.options ? Math.max(0, q.options.indexOf(q.answer)) : 0,
       answer: q.answer, starter_code: q.starter_code || '', points: q.points,
+      language: q.language || 'javascript',
     }));
-    if (!qbQuestions.length) qbQuestions.push({ type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10 });
+    if (!qbQuestions.length) qbQuestions.push({ type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10, language: 'javascript' });
     renderCompForm({
       title: competition.title, description: competition.description,
       starts_at: toLocalInput(competition.starts_at), ends_at: toLocalInput(competition.ends_at),
@@ -1013,6 +1075,7 @@ function syncQbFromDom() {
       const checked = $('.opt-radio:checked', el);
       q.answer_index = checked ? parseInt(checked.value, 10) : 0;
     } else {
+      q.language = $('.q-lang-select', el)?.value ?? q.language ?? 'javascript';
       q.answer = $('.q-answer-input', el)?.value ?? q.answer;
       q.starter_code = $('.q-starter-input', el)?.value ?? q.starter_code;
     }
@@ -1023,6 +1086,7 @@ function renderQList(editable = true) {
   const list = $('#q-list');
   if (!list) return;
   list.innerHTML = qbQuestions.map((q, i) => {
+    const qLang = q.language || 'javascript';
     const typeUi = q.type === 'mcq'
       ? `
         <div id="opts-${i}">
@@ -1036,11 +1100,21 @@ function renderQList(editable = true) {
           <p class="faint" style="margin:6px 0 0">Select the radio button next to the correct answer.</p>` : ''}
         </div>`
       : `
-        <div class="field"><label>Expected output <span class="req">*</span></label>
-          <input class="input mono q-answer-input" value="${esc(q.answer)}" placeholder="e.g. 55" ${editable ? '' : 'disabled'} /></div>
+        <div class="form-row">
+          <div class="field" style="flex:1">
+            <label>Programming language</label>
+            <select class="input q-lang-select" onchange="onLangChange(${i}, this.value)" ${editable ? '' : 'disabled'}>
+              ${SUPPORTED_LANGUAGES.map((l) => `<option value="${l.id}" ${qLang === l.id ? 'selected' : ''}>${l.icon} ${l.label}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="flex:2">
+            <label>Expected output <span class="req">*</span></label>
+            <input class="input mono q-answer-input" value="${esc(q.answer)}" placeholder="e.g. 55" ${editable ? '' : 'disabled'} />
+          </div>
+        </div>
         <div class="field"><label>Starter code shown to students</label>
-          <textarea class="code-editor q-starter-input" style="min-height:110px" placeholder="// code template" ${editable ? '' : 'disabled'}>${esc(q.starter_code)}</textarea></div>
-        <p class="faint">Students write JavaScript; your expected output is compared (ignoring case &amp; extra whitespace).</p>`;
+          <textarea class="code-editor q-starter-input" style="min-height:110px" placeholder="// code template" ${editable ? '' : 'disabled'}>${esc(q.starter_code || '')}</textarea></div>
+        <p class="faint">Students solve in the selected language; their stdout is compared against expected output (ignoring extra whitespace &amp; case).</p>`;
     return `
       <div class="q-builder-item">
         <div class="qb-head">
@@ -1064,7 +1138,16 @@ function renderQList(editable = true) {
 
 function addQuestion(type) {
   syncQbFromDom();
-  qbQuestions.push({ type, prompt: '', options: type === 'mcq' ? ['', ''] : undefined, answer_index: 0, answer: '', starter_code: '', points: 10 });
+  qbQuestions.push({
+    type,
+    prompt: '',
+    options: type === 'mcq' ? ['', ''] : undefined,
+    answer_index: 0,
+    answer: '',
+    starter_code: type === 'output' ? DEFAULT_STARTER_CODE.javascript : '',
+    points: 10,
+    language: 'javascript',
+  });
   renderQList();
 }
 function removeQuestion(i) { syncQbFromDom(); qbQuestions.splice(i, 1); renderQList(); }
@@ -1074,6 +1157,10 @@ function setType(i, type) {
   if (q.type === type) return;
   q.type = type;
   if (type === 'mcq' && !q.options) { q.options = ['', '']; q.answer_index = 0; }
+  if (type === 'output') {
+    q.language = q.language || 'javascript';
+    if (!q.starter_code) q.starter_code = DEFAULT_STARTER_CODE[q.language];
+  }
   renderQList();
 }
 function addOption(i) { syncQbFromDom(); qbQuestions[i].options.push(''); renderQList(); }

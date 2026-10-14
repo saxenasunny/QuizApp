@@ -185,8 +185,18 @@ app.put('/api/profile', requireAuth, async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* Code runner (practical output-based questions)                      */
+/* Code runner (multi-language practical questions via Judge0 / Node)  */
 /* ------------------------------------------------------------------ */
+const JUDGE0_LANGUAGES = {
+  javascript: 102, // Node.js (22.08.0)
+  python: 100,     // Python (3.12.5)
+  c: 103,          // C (GCC 14.1.0)
+  cpp: 105,        // C++ (GCC 14.1.0)
+  java: 91,        // Java (JDK 17.0.6)
+};
+
+const JUDGE0_BASE_URL = process.env.JUDGE0_URL || 'https://ce.judge0.com';
+
 function runJavaScript(code) {
   return new Promise((resolve) => {
     const child = execFile(process.execPath, ['-e', code], { timeout: 2500, killSignal: 'SIGKILL', windowsHide: true }, (err, stdout, stderr) => {
@@ -197,13 +207,81 @@ function runJavaScript(code) {
   });
 }
 
+async function runWithJudge0(code, language) {
+  const langKey = String(language || 'python').toLowerCase().trim();
+  const langId = JUDGE0_LANGUAGES[langKey] || JUDGE0_LANGUAGES.python;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (process.env.JUDGE0_API_KEY) {
+      headers['X-RapidAPI-Key'] = process.env.JUDGE0_API_KEY;
+      headers['X-RapidAPI-Host'] = 'judge0-ce.p.rapidapi.com';
+    }
+
+    const res = await fetch(`${JUDGE0_BASE_URL}/submissions?base64_encoded=false&wait=true`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        source_code: code,
+        language_id: langId,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return { ok: false, error: `Execution service error (${res.status}): ${errText.slice(0, 300)}`, stdout: '' };
+    }
+
+    const data = await res.json();
+    const compileOutput = data.compile_output ? String(data.compile_output).trim() : '';
+    const stderr = data.stderr ? String(data.stderr).trim() : '';
+    const stdout = data.stdout ? String(data.stdout) : '';
+
+    if (compileOutput) {
+      return { ok: false, error: compileOutput.slice(0, 3000), stdout };
+    }
+    if (data.status && data.status.id === 5) {
+      return { ok: false, error: '⏱ Time limit exceeded (execution timeout).', stdout };
+    }
+    if (stderr && !stdout) {
+      return { ok: false, error: stderr.slice(0, 2000), stdout: '' };
+    }
+    if (data.status && data.status.id > 3) {
+      const errMsg = stderr || data.status.description || 'Execution failed';
+      return { ok: false, error: errMsg.slice(0, 2000), stdout };
+    }
+
+    return { ok: true, error: stderr.slice(0, 1000), stdout: stdout.slice(0, 10000) };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      return { ok: false, error: '⏱ Time limit exceeded (12s network timeout).', stdout: '' };
+    }
+    return { ok: false, error: `Execution service error: ${err.message}`, stdout: '' };
+  }
+}
+
+async function runCode(code, language = 'javascript') {
+  const lang = String(language || 'javascript').toLowerCase().trim();
+  if (lang === 'javascript' || lang === 'js') {
+    return runJavaScript(code);
+  }
+  return runWithJudge0(code, lang);
+}
+
 const normalize = (s) => String(s ?? '').trim().replace(/\r\n/g, '\n').split('\n').map((l) => l.trimEnd()).join('\n').toLowerCase();
 
 app.post('/api/run', requireAuth, async (req, res) => {
   const code = String(req.body?.code || '');
+  const language = String(req.body?.language || 'javascript').toLowerCase();
   if (!code.trim()) return res.status(400).json({ error: 'Write some code first.' });
   if (code.length > 20000) return res.status(400).json({ error: 'Code is too long (20,000 char limit).' });
-  const result = await runJavaScript(code);
+  const result = await runCode(code, language);
   res.json(result);
 });
 
@@ -342,6 +420,7 @@ app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req,
       options: q.options_json ? JSON.parse(q.options_json) : null,
       starter_code: q.starter_code,
       points: q.points,
+      language: q.language || 'javascript',
       // answer intentionally omitted
     })),
   });
@@ -365,7 +444,8 @@ async function gradeAttempt(attemptId, answers, autoSubmit = false) {
         ok = normalize(given) === normalize(q.answer);
       } else {
         // practical: run the student's code and compare stdout with expected output
-        const run = runJavaScriptSync(given);
+        const qLang = answers[`${q.id}_lang`] || q.language || 'javascript';
+        const run = await runCode(given, qLang);
         ok = run.ok && normalize(run.stdout) === normalize(q.answer);
       }
     }
@@ -383,17 +463,6 @@ async function gradeAttempt(attemptId, answers, autoSubmit = false) {
   `).run(new Date().toISOString(), score, correct, autoSubmit ? capped : elapsed, attemptId);
 
   return { score, correct, total: questions.length, details };
-}
-
-/* Synchronous variant so submit stays a single response (fast child spawn). */
-function runJavaScriptSync(code) {
-  const { spawnSync } = require('child_process');
-  const r = spawnSync(process.execPath, ['-e', code], { timeout: 2500, killSignal: 'SIGKILL', windowsHide: true, encoding: 'utf8', maxBuffer: 1024 * 512 });
-  if ((r.error && r.error.code === 'ETIMEDKILLED') || (r.signal === 'SIGKILL')) {
-    return { ok: false, error: 'Time limit exceeded', stdout: '' };
-  }
-  if (r.status !== 0) return { ok: false, error: String(r.stderr || 'Runtime error').slice(0, 2000), stdout: String(r.stdout || '') };
-  return { ok: true, error: '', stdout: String(r.stdout || '') };
 }
 
 /* Submit answers. Body: { answers: { [questionId]: string } } */
@@ -501,7 +570,8 @@ function validateQuestions(list) {
     } else {
       const expected = String(q.answer || '').trim();
       if (!expected) return { error: `Question ${i + 1}: expected output is required.` };
-      clean.push({ type, prompt, options_json: null, answer: expected, starter_code: String(q.starter_code || ''), points });
+      const lang = String(q.language || 'javascript').toLowerCase().trim();
+      clean.push({ type, prompt, options_json: null, answer: expected, starter_code: String(q.starter_code || ''), points, language: lang });
     }
   }
   return { questions: clean };
@@ -519,12 +589,12 @@ app.post('/api/admin/competitions', requireAuth, requireAdmin, async (req, res) 
   `).run(v.title, v.description, v.starts_at, v.ends_at, v.duration_minutes, req.user.id, new Date().toISOString());
   const id = r.lastInsertRowid;
   const ins = db.prepare(`
-    INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order, language)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (let i = 0; i < qv.questions.length; i++) {
     const q = qv.questions[i];
-    await ins.run(id, q.type, q.prompt, q.options_json, q.answer, q.starter_code, q.points, i);
+    await ins.run(id, q.type, q.prompt, q.options_json, q.answer, q.starter_code, q.points, i, q.language || 'javascript');
   }
   res.status(201).json({ id });
 });
@@ -564,12 +634,12 @@ app.put('/api/admin/competitions/:id', requireAuth, requireAdmin, async (req, re
     if (qv.error) return res.status(400).json({ error: qv.error });
     await db.prepare('DELETE FROM questions WHERE competition_id = ?').run(comp.id);
     const ins = db.prepare(`
-      INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order, language)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (let i = 0; i < qv.questions.length; i++) {
       const q = qv.questions[i];
-      await ins.run(comp.id, q.type, q.prompt, q.options_json, q.answer, q.starter_code, q.points, i);
+      await ins.run(comp.id, q.type, q.prompt, q.options_json, q.answer, q.starter_code, q.points, i, q.language || 'javascript');
     }
   }
   res.json({ ok: true, questions_locked: hasAttempts });

@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS questions (
   answer         TEXT NOT NULL,
   starter_code   TEXT,
   points         INTEGER NOT NULL DEFAULT 10,
-  sort_order     INTEGER NOT NULL DEFAULT 0
+  sort_order     INTEGER NOT NULL DEFAULT 0,
+  language       TEXT NOT NULL DEFAULT 'javascript'
 );
 
 CREATE TABLE IF NOT EXISTS registrations (
@@ -307,6 +308,11 @@ async function init() {
   initPromise = (async () => {
     try {
       await client.executeMultiple(SCHEMA);
+      try {
+        await client.execute("ALTER TABLE questions ADD COLUMN language TEXT DEFAULT 'javascript'");
+      } catch {
+        // column already exists
+      }
       await seed();
     } catch (e) {
       initPromise = null; // allow retry on transient failure
