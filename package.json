@@ -1,5 +1,5 @@
 {
-  "name": "coding-arena",
+  "name": "cryptic-coding-arena",
   "version": "1.0.0",
   "description": "Programming Quiz web app - live coding competitions with rankings for students and an admin panel",
   "main": "server.js",

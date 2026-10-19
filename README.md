@@ -1,4 +1,4 @@
-# ⚔️ Coding Arena
+# ⚔️ Cryptic Coding Arena
 
 A programming quiz web app for **live coding competitions** with rankings for students and a
 full admin panel. Built with **Node + Express + SQLite** (no native build tools needed — uses

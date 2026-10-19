@@ -1,5 +1,5 @@
 /* ============================================================
-   Coding Arena — SPA (hash router, no framework)
+   Cryptic Coding Arena — SPA (hash router, no framework)
    ============================================================ */
 'use strict';
 
@@ -161,7 +161,7 @@ function renderNav(active = '') {
   if (ME.role === 'admin') links.push({ href: '#/admin', label: '🛠️ Admin Panel' });
   nav.innerHTML = `
     <div class="navbar-inner">
-      <div class="logo" onclick="location.hash='#/dashboard'"><span class="logo-icon">⚔️</span> Coding<span class="grad-text">Arena</span></div>
+      <div class="logo" onclick="location.hash='#/dashboard'"><span class="logo-icon">⚔️</span> Cryptic Coding<span class="grad-text">Arena</span></div>
       <div class="nav-links">
         ${links.map((l) => `<a class="nav-link ${active === l.href ? 'active' : ''}" href="${l.href}">${l.label}</a>`).join('')}
       </div>
@@ -191,7 +191,7 @@ function authHero() {
   return `
     <div class="auth-hero">
       <h1>Compete. Code. <span class="grad-text">Climb the ranks.</span></h1>
-      <p class="tagline">Coding Arena is your campus platform for live programming competitions — objective quizzes and real output-based coding tasks, scored instantly, ranked globally.</p>
+      <p class="tagline">Cryptic Coding Arena is your campus platform for live programming competitions — objective quizzes and real output-based coding tasks, scored instantly, ranked globally.</p>
       <ul class="feature-list">
         <li><span class="ico">⚡</span><span><b>Live competitions</b>Join events created by your admin and compete in real time.</span></li>
         <li><span class="ico">💻</span><span><b>Two question types</b>Objective MCQs + practical output-based code challenges you actually write code for.</span></li>
@@ -290,7 +290,7 @@ function viewRegister() {
       const { user } = await api('/api/auth/register', { method: 'POST', body: fd });
       ME = user;
       try { localStorage.setItem('coding_arena_user', JSON.stringify(user)); } catch {}
-      toast('Account created — welcome to Coding Arena! 🎉', 'success');
+      toast('Account created — welcome to Cryptic Coding Arena! 🎉', 'success');
       location.hash = '#/dashboard';
     } catch (err) { toast(err.message, 'error'); }
   });
@@ -1422,6 +1422,8 @@ if (!location.hash || location.hash === '#/') {
   location.hash = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';
 }
 window.addEventListener('hashchange', router);
+const cy = $('#copyright-year');
+if (cy) cy.textContent = new Date().getFullYear();
 router();
 
 // 3. Verify / refresh session in background without blocking UI

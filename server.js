@@ -773,7 +773,7 @@ if (IS_VERCEL) {
   module.exports = app;
 } else {
   app.listen(PORT, () => {
-    console.log(`Coding Arena running at http://localhost:${PORT}`);
+    console.log(`Cryptic Coding Arena running at http://localhost:${PORT}`);
   });
   module.exports = app;
 }

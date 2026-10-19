@@ -1,5 +1,5 @@
 /* ============================================================
-   Coding Arena — neon dark theme
+   Cryptic Coding Arena — neon dark theme
    ============================================================ */
 :root {
   --bg: #070912;
@@ -33,6 +33,8 @@ body {
   font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   min-height: 100vh;
   overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ---------- animated background orbs ---------- */
@@ -48,8 +50,25 @@ body {
 }
 
 /* ---------- layout ---------- */
-.app-container { max-width: 1180px; margin: 0 auto; padding: 28px 20px 80px; }
+.app-container { flex: 1; max-width: 1180px; width: 100%; margin: 0 auto; padding: 28px 20px 50px; }
 .hidden { display: none !important; }
+
+/* ---------- footer ---------- */
+.app-footer {
+  margin-top: auto;
+  padding: 22px 20px;
+  text-align: center;
+  border-top: 1px solid var(--border);
+  background: rgba(7, 9, 18, 0.75);
+  backdrop-filter: blur(12px);
+  font-size: 13.5px;
+  color: var(--muted);
+  user-select: none;
+}
+.app-footer b, .app-footer strong {
+  color: var(--text);
+  font-weight: 600;
+}
 
 /* ---------- navbar ---------- */
 .navbar {
