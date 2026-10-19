@@ -298,6 +298,7 @@ tr.me-row { background: rgba(139, 92, 246, 0.11) !important; outline: 1px solid 
   width: 100%; min-height: 190px; border-radius: 13px; padding: 16px 18px;
   font-family: var(--mono); font-size: 13.8px; line-height: 1.75; tab-size: 2;
   background: #05070f; border: 1px solid var(--border-strong); color: #d7e1f5; outline: none; resize: vertical;
+  -webkit-touch-callout: none;
 }
 .code-editor:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.14); }
 .console-out {

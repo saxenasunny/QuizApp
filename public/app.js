@@ -68,6 +68,15 @@ function toast(msg, kind = 'info') {
   setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .4s'; setTimeout(() => el.remove(), 400); }, 4200);
 }
 
+let lastSecurityToast = 0;
+function securityNotice(msg) {
+  const now = Date.now();
+  if (now - lastSecurityToast > 1400) {
+    lastSecurityToast = now;
+    toast(msg, 'error');
+  }
+}
+
 const fmtDate = (d) => new Date(d).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fmtDateFull = (d) => new Date(d).toLocaleString([], { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 const fmtSecs = (s) => `${Math.floor(s / 60)}m ${s % 60}s`;
@@ -557,15 +566,22 @@ function renderQuiz() {
     body = `
       <p class="muted" style="font-size:13.5px;margin:-8px 0 12px">✍️ Write your solution in <b>${langObj.label}</b>. Use <span class="mono">${printHint}</span> to print the output. Code is executed on the server when you press <b>Run</b> or <b>Submit</b>.</p>
       <div class="code-area">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;flex-wrap:wrap">
           <div style="display:flex;align-items:center;gap:8px">
             <span class="faint" style="font-size:12.5px">Language:</span>
             <select class="input" style="padding:4px 10px;font-size:13px;width:auto;height:auto" id="quiz-lang-select" onchange="changeQuizLang(${q.id}, this.value)">
               ${SUPPORTED_LANGUAGES.map((l) => `<option value="${l.id}" ${qLang === l.id ? 'selected' : ''}>${l.icon} ${l.label}</option>`).join('')}
             </select>
           </div>
+          <span class="chip" style="font-size:11.5px;padding:3px 9px;color:var(--muted);border-color:rgba(255,255,255,0.08)"><span style="opacity:0.85">🔒</span> Copy, Paste &amp; Right-click disabled</span>
         </div>
-        <textarea class="code-editor" id="code-editor" spellcheck="false" oninput="saveCode(${q.id})">${esc(s.answers[q.id] ?? q.starter_code ?? '')}</textarea>
+        <textarea class="code-editor" id="code-editor" spellcheck="false"
+          oninput="saveCode(${q.id})"
+          onpaste="return false;"
+          oncopy="return false;"
+          oncut="return false;"
+          oncontextmenu="return false;"
+          ondrop="return false;">${esc(s.answers[q.id] ?? q.starter_code ?? '')}</textarea>
         <div style="display:flex;gap:10px;margin-top:11px;flex-wrap:wrap">
           <button class="btn btn-ghost btn-sm" id="run-btn" onclick="runCode(${q.id})">▶ Run Code</button>
           <span class="faint" style="align-self:center">Output is compared with the expected output (ignoring case &amp; extra spaces).</span>
@@ -598,6 +614,95 @@ function renderQuiz() {
         </div>
       </div>
     </div>`;
+
+  // Attach anti-cheat protections for participants in practical coding
+  if (q.type !== 'mcq') {
+    const ed = $('#code-editor');
+    if (ed) {
+      // Prevent context menu (right click)
+      ed.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        securityNotice('Right-click is disabled during the competition.');
+      });
+
+      // Prevent paste event (mouse or shortcut)
+      ed.addEventListener('paste', (e) => {
+        e.preventDefault();
+        securityNotice('Pasting is disabled for practical challenges. Please write your own code.');
+      });
+
+      // Prevent copy event
+      ed.addEventListener('copy', (e) => {
+        e.preventDefault();
+        securityNotice('Copying code is disabled for this challenge.');
+      });
+
+      // Prevent cut event
+      ed.addEventListener('cut', (e) => {
+        e.preventDefault();
+        securityNotice('Cut is disabled for this challenge.');
+      });
+
+      // Prevent drag-and-drop into editor
+      ed.addEventListener('drop', (e) => {
+        e.preventDefault();
+        securityNotice('Pasting or dropping code is disabled.');
+      });
+      ed.addEventListener('dragover', (e) => {
+        e.preventDefault();
+      });
+
+      // Intercept keyboard shortcuts (Ctrl+V, Ctrl+C, Ctrl+X, Cmd+V, Cmd+C, Cmd+X, Shift+Insert, Ctrl+Insert)
+      // and support Tab key indentation
+      ed.addEventListener('keydown', (e) => {
+        const isMod = e.ctrlKey || e.metaKey;
+        const k = e.key ? e.key.toLowerCase() : '';
+
+        if ((isMod && k === 'v') || (e.shiftKey && e.key === 'Insert')) {
+          e.preventDefault();
+          securityNotice('Ctrl+V / Pasting is disabled for practical challenges.');
+          return;
+        }
+        if ((isMod && k === 'c') || (isMod && e.key === 'Insert')) {
+          e.preventDefault();
+          securityNotice('Ctrl+C / Copying is disabled for this challenge.');
+          return;
+        }
+        if (isMod && k === 'x') {
+          e.preventDefault();
+          securityNotice('Ctrl+X / Cut is disabled for this challenge.');
+          return;
+        }
+
+        // Tab indentation support
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          const start = ed.selectionStart;
+          const end = ed.selectionEnd;
+          ed.value = ed.value.substring(0, start) + '    ' + ed.value.substring(end);
+          ed.selectionStart = ed.selectionEnd = start + 4;
+          saveCode(q.id);
+        }
+      });
+    }
+
+    const codeArea = $('.code-area');
+    if (codeArea) {
+      codeArea.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        securityNotice('Right-click is disabled during the competition.');
+      });
+    }
+  }
+
+  // Disable right-click across the entire question card during competitions
+  const qBody = $('.q-body');
+  if (qBody) {
+    qBody.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      securityNotice('Right-click is disabled during the competition.');
+    });
+  }
 }
 
 function changeQuizLang(qid, newLang) {
