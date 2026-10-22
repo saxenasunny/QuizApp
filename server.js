@@ -297,12 +297,100 @@ async function runWithJudge0(code, language, stdin = '') {
   }
 }
 
+async function runWithCodapi(code, language, stdin = '') {
+  const langKey = String(language || 'python').toLowerCase().trim();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+  try {
+    let sandbox = 'python';
+    let files = {};
+
+    if (langKey === 'python' || langKey === 'py') {
+      sandbox = 'python';
+      let wrappedCode = code;
+      if (stdin !== undefined && stdin !== null && stdin !== '') {
+        wrappedCode = `import io, sys\nsys.stdin = io.StringIO(${JSON.stringify(String(stdin))})\n${code}`;
+      }
+      files = { '': wrappedCode };
+    } else if (langKey === 'c') {
+      sandbox = 'gcc';
+      let wrappedCode = code;
+      if (stdin !== undefined && stdin !== null && stdin !== '') {
+        wrappedCode = `#include <stdio.h>\n#define main __student_main__\n${code}\n#undef main\nint main(int argc, char** argv) {\n    freopen("input.txt", "r", stdin);\n    return __student_main__();\n}`;
+        files = { '': wrappedCode, 'input.txt': String(stdin) };
+      } else {
+        files = { '': code };
+      }
+    } else if (langKey === 'cpp' || langKey === 'c++') {
+      sandbox = 'cpp';
+      let wrappedCode = code;
+      if (stdin !== undefined && stdin !== null && stdin !== '') {
+        wrappedCode = `#include <iostream>\n#include <cstdio>\n#define main __student_main__\n${code}\n#undef main\nint main(int argc, char** argv) {\n    freopen("input.txt", "r", stdin);\n    return __student_main__();\n}`;
+        files = { '': wrappedCode, 'input.txt': String(stdin) };
+      } else {
+        files = { '': code };
+      }
+    } else if (langKey === 'java') {
+      sandbox = 'java';
+      let wrappedCode = code;
+      if (stdin !== undefined && stdin !== null && stdin !== '') {
+        wrappedCode = code.replace(/public\s+class\s+\w+\s*\{/, (match) => {
+          return `${match}\n  static { try { if (new java.io.File("input.txt").exists()) System.setIn(new java.io.FileInputStream("input.txt")); } catch(Exception e){} }\n`;
+        });
+        files = { '': wrappedCode, 'input.txt': String(stdin) };
+      } else {
+        files = { '': code };
+      }
+    } else {
+      sandbox = 'python';
+      files = { '': code };
+    }
+
+    const res = await fetch('https://api.codapi.org/v1/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sandbox,
+        command: 'run',
+        files,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return { ok: false, error: `Execution service error (${res.status}): ${errText.slice(0, 300)}`, stdout: '' };
+    }
+
+    const data = await res.json();
+    const stdout = data.stdout ? String(data.stdout) : '';
+    const stderr = data.stderr ? String(data.stderr) : '';
+
+    if (!data.ok) {
+      return { ok: false, error: (stderr || 'Execution failed').slice(0, 3000), stdout };
+    }
+
+    return { ok: true, error: stderr.slice(0, 1000), stdout: stdout.slice(0, 10000) };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      return { ok: false, error: '⏱ Execution timeout (6s limit).', stdout: '' };
+    }
+    return { ok: false, error: `Execution service error: ${err.message}`, stdout: '' };
+  }
+}
+
 async function runCode(code, language = 'javascript', stdin = '') {
   const lang = String(language || 'javascript').toLowerCase().trim();
   if (lang === 'javascript' || lang === 'js') {
     return runJavaScript(code, stdin);
   }
-  return runWithJudge0(code, lang, stdin);
+  if (process.env.JUDGE0_URL || process.env.JUDGE0_API_KEY) {
+    return runWithJudge0(code, lang, stdin);
+  }
+  return runWithCodapi(code, lang, stdin);
 }
 
 const normalize = (s) => String(s ?? '').trim().replace(/\r\n/g, '\n').split('\n').map((l) => l.trimEnd()).join('\n').toLowerCase();
@@ -352,29 +440,21 @@ app.post('/api/questions/:id/test-run', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'No test cases configured for this question.' });
   }
 
-  const cases = [];
-  let compileOrRuntimeError = null;
-
-  for (let i = 0; i < testCases.length; i++) {
-    const tc = testCases[i];
+  const casePromises = testCases.map(async (tc, i) => {
     const run = await runCode(code, language, tc.input);
     const actualNorm = normalize(run.stdout);
     const expectedNorm = normalize(tc.output);
     const passed = run.ok && actualNorm === expectedNorm;
 
-    if (!run.ok && !compileOrRuntimeError) {
-      compileOrRuntimeError = run.error || 'Execution error';
-    }
-
     if (tc.hidden) {
-      cases.push({
+      return {
         case_number: i + 1,
         hidden: true,
         passed,
         error: run.ok ? null : (run.error || 'Execution error'),
-      });
+      };
     } else {
-      cases.push({
+      return {
         case_number: i + 1,
         hidden: false,
         input: tc.input,
@@ -382,11 +462,13 @@ app.post('/api/questions/:id/test-run', requireAuth, async (req, res) => {
         actual: run.stdout,
         passed,
         error: run.ok ? null : (run.error || 'Execution error'),
-      });
+      };
     }
-  }
+  });
 
+  const cases = await Promise.all(casePromises);
   const passedCount = cases.filter((c) => c.passed).length;
+  const compileOrRuntimeError = cases.find((c) => !c.passed && c.error)?.error || null;
   res.json({
     ok: true,
     summary: {
@@ -618,20 +700,21 @@ async function gradeAttempt(attemptId, answers, autoSubmit = false) {
         const testCases = parseTestCases(q);
         totalCases = testCases.length;
         const qLang = answers[`${q.id}_lang`] || q.language || 'javascript';
-        for (let tIdx = 0; tIdx < testCases.length; tIdx++) {
-          const tc = testCases[tIdx];
+        const casePromises = testCases.map(async (tc, tIdx) => {
           const run = await runCode(given, qLang, tc.input);
           const passed = run.ok && normalize(run.stdout) === normalize(tc.output);
-          if (passed) passedCount++;
-          testResults.push({
+          return {
             case_number: tIdx + 1,
             hidden: tc.hidden,
             passed,
             input: tc.hidden ? null : tc.input,
             expected: tc.hidden ? null : tc.output,
             actual: tc.hidden ? null : run.stdout,
-          });
-        }
+          };
+        });
+        const parallelResults = await Promise.all(casePromises);
+        testResults.push(...parallelResults);
+        passedCount = parallelResults.filter((r) => r.passed).length;
         ok = totalCases > 0 && passedCount === totalCases;
         earnedPoints = totalCases > 0 ? Math.round((passedCount / totalCases) * q.points) : (ok ? q.points : 0);
       }
