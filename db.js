@@ -118,7 +118,8 @@ CREATE TABLE IF NOT EXISTS questions (
   starter_code   TEXT,
   points         INTEGER NOT NULL DEFAULT 10,
   sort_order     INTEGER NOT NULL DEFAULT 0,
-  language       TEXT NOT NULL DEFAULT 'javascript'
+  language       TEXT NOT NULL DEFAULT 'javascript',
+  test_cases_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS registrations (
@@ -319,6 +320,13 @@ async function init() {
             await client.execute('ALTER TABLE competitions ADD COLUMN batch_year TEXT');
           } catch {}
         }
+        try {
+          await client.execute('SELECT test_cases_json FROM questions LIMIT 1');
+        } catch {
+          try {
+            await client.execute('ALTER TABLE questions ADD COLUMN test_cases_json TEXT');
+          } catch {}
+        }
         isDbReady = true;
         return;
       } catch {
@@ -332,6 +340,9 @@ async function init() {
       }
       try {
         await client.execute('ALTER TABLE competitions ADD COLUMN batch_year TEXT');
+      } catch {}
+      try {
+        await client.execute('ALTER TABLE questions ADD COLUMN test_cases_json TEXT');
       } catch {}
       await seed();
       isDbReady = true;

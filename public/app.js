@@ -124,11 +124,11 @@ const SUPPORTED_LANGUAGES = [
 ];
 
 const DEFAULT_STARTER_CODE = {
-  javascript: '// Write your JavaScript solution\nconsole.log();\n',
-  python: '# Write your Python solution\nprint()\n',
-  c: '#include <stdio.h>\n\nint main() {\n    // Write your C solution\n    printf("");\n    return 0;\n}\n',
-  cpp: '#include <iostream>\n\nint main() {\n    // Write your C++ solution\n    std::cout << "";\n    return 0;\n}\n',
-  java: 'public class Main {\n    public static void main(String[] args) {\n        // Write your Java solution\n        System.out.println();\n    }\n}\n',
+  javascript: '// Read stdin: const input = require("fs").readFileSync(0, "utf-8").trim();\nconsole.log();\n',
+  python: '# Read stdin: import sys; input_data = sys.stdin.read().split()\n# or val = input()\nprint()\n',
+  c: '#include <stdio.h>\n\nint main() {\n    // Write your C solution\n    return 0;\n}\n',
+  cpp: '#include <iostream>\nusing namespace std;\n\nint main() {\n    // Write your C++ solution\n    return 0;\n}\n',
+  java: 'import java.util.Scanner;\n\npublic class Main {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        // Write your Java solution\n    }\n}\n',
 };
 
 function getPrintHint(lang) {
@@ -512,7 +512,16 @@ function viewQuiz(compId) {
   $('#app').innerHTML = '<div class="spinner"></div>';
   api(`/api/competitions/${compId}/start`, { method: 'POST' })
     .then((data) => {
-      quizState = { compId, attempt: data.attempt, competition: data.competition, questions: data.questions, idx: 0, answers: {} };
+      quizState = {
+        compId,
+        attempt: data.attempt,
+        competition: data.competition,
+        questions: data.questions,
+        idx: 0,
+        answers: {},
+        testResults: {},
+        activeTcTab: {},
+      };
       renderQuiz();
       if (quizTimer) clearInterval(quizTimer);
       quizTimer = setInterval(() => {
@@ -557,8 +566,90 @@ function renderQuiz() {
     const qLang = s.answers[`${q.id}_lang`] || q.language || 'javascript';
     const langObj = SUPPORTED_LANGUAGES.find((l) => l.id === qLang) || SUPPORTED_LANGUAGES[0];
     const printHint = getPrintHint(qLang);
+    const tcs = q.test_cases && q.test_cases.length ? q.test_cases : [{ case_number: 1, input: '', output: '', hidden: false }];
+    if (s.activeTcTab[q.id] === undefined) s.activeTcTab[q.id] = 0;
+    const currentTab = Math.min(s.activeTcTab[q.id], tcs.length - 1);
+    const result = s.testResults[q.id] || null;
+
+    const tcTabsHtml = tcs.map((tc, ti) => {
+      let statusClass = '';
+      let statusIco = '';
+      if (result && result.cases && result.cases[ti]) {
+        const cRes = result.cases[ti];
+        if (cRes.passed) { statusClass = 'pass'; statusIco = '✔ '; }
+        else { statusClass = 'fail'; statusIco = '✖ '; }
+      }
+      return `
+        <button type="button" class="tc-tab-btn ${ti === currentTab ? 'active' : ''} ${statusClass}" onclick="switchTcTab(${q.id}, ${ti})">
+          ${statusIco}${tc.hidden ? '🔒 Case ' + (ti + 1) : 'Case ' + (ti + 1)}
+        </button>
+      `;
+    }).join('');
+
+    const activeTc = tcs[currentTab] || tcs[0];
+    const activeRes = result && result.cases ? result.cases[currentTab] : null;
+
+    let tcBodyHtml = '';
+    if (result && result.summary) {
+      let bannerClass = 'ok';
+      let bannerText = `🎉 All ${result.summary.total} Test Cases Passed!`;
+      if (result.summary.error) {
+        bannerClass = 'err';
+        bannerText = `❌ Error: ${esc(result.summary.error)}`;
+      } else if (!result.summary.all_passed) {
+        bannerClass = result.summary.passed_count > 0 ? 'warn' : 'err';
+        bannerText = `⚠️ ${result.summary.passed_count} of ${result.summary.total} Test Cases Passed`;
+      }
+
+      let caseDetailHtml = '';
+      if (activeRes) {
+        if (activeRes.hidden) {
+          caseDetailHtml = `
+            <div style="padding:10px 0">
+              <span style="font-weight:600;font-size:13px">🔒 Hidden Test Case:</span>
+              ${activeRes.passed ? '<span class="badge badge-info" style="margin-left:8px">Passed ✔</span>' : '<span class="badge" style="margin-left:8px;background:rgba(248,113,113,0.2);color:var(--red)">Failed ✖ (Output mismatch or error)</span>'}
+              ${activeRes.error ? `<div class="tc-label" style="margin-top:10px;color:var(--red)">Error</div><pre class="tc-code" style="color:var(--red)">${esc(activeRes.error)}</pre>` : ''}
+            </div>
+          `;
+        } else {
+          caseDetailHtml = `
+            <div class="tc-label">Input (stdin)</div>
+            <pre class="tc-code">${esc(activeRes.input || '(no stdin input)')}</pre>
+            <div class="tc-label">Expected Output</div>
+            <pre class="tc-code">${esc(activeRes.expected || '')}</pre>
+            <div class="tc-label">Your Code Output</div>
+            <pre class="tc-code" style="color:${activeRes.passed ? 'var(--green)' : 'var(--red)'}">${esc(activeRes.actual || '(no output)')}</pre>
+            ${activeRes.error ? `<div class="tc-label" style="color:var(--red)">Runtime / Compiler Error</div><pre class="tc-code" style="color:var(--red)">${esc(activeRes.error)}</pre>` : ''}
+          `;
+        }
+      }
+
+      tcBodyHtml = `
+        <div class="tc-summary-banner ${bannerClass}">
+          <div>${bannerText}</div>
+          <div style="font-size:12px;opacity:0.85">${result.summary.passed_count}/${result.summary.total} Passed</div>
+        </div>
+        ${caseDetailHtml}
+      `;
+    } else {
+      if (activeTc.hidden) {
+        tcBodyHtml = `
+          <div style="padding:14px 6px;color:var(--muted);font-size:13.5px">
+            🔒 <b>Hidden Test Case</b>: The input and output are hidden. This test case will be evaluated against your code when you click <b>Run &amp; Check Test Cases</b> or submit.
+          </div>
+        `;
+      } else {
+        tcBodyHtml = `
+          <div class="tc-label">Input (stdin)</div>
+          <pre class="tc-code">${esc(activeTc.input || '(no stdin input)')}</pre>
+          <div class="tc-label">Expected Output</div>
+          <pre class="tc-code">${esc(activeTc.output || '')}</pre>
+        `;
+      }
+    }
+
     body = `
-      <p class="muted" style="font-size:13.5px;margin:-8px 0 12px">✍️ Write your solution in <b>${langObj.label}</b>. Use <span class="mono">${printHint}</span> to print the output. Code is executed on the server when you press <b>Run</b> or <b>Submit</b>.</p>
+      <p class="muted" style="font-size:13.5px;margin:-8px 0 12px">✍️ Write your solution in <b>${langObj.label}</b>. Use <span class="mono">${printHint}</span> to print the output. Code is tested against all test cases.</p>
       <div class="code-area">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;flex-wrap:wrap">
           <div style="display:flex;align-items:center;gap:8px">
@@ -576,11 +667,19 @@ function renderQuiz() {
           oncut="return false;"
           oncontextmenu="return false;"
           ondrop="return false;">${esc(s.answers[q.id] ?? q.starter_code ?? '')}</textarea>
-        <div style="display:flex;gap:10px;margin-top:11px;flex-wrap:wrap">
-          <button class="btn btn-ghost btn-sm" id="run-btn" onclick="runCode(${q.id})">▶ Run Code</button>
-          <span class="faint" style="align-self:center">Output is compared with the expected output (ignoring case &amp; extra spaces).</span>
+        <div style="display:flex;gap:10px;margin-top:11px;flex-wrap:wrap;align-items:center">
+          <button type="button" class="btn btn-primary btn-sm" id="test-run-btn" onclick="runTestCases(${q.id})">▶ Run &amp; Check Test Cases</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="run-btn" onclick="runCode(${q.id})">▶ Run Code</button>
+          <span class="faint" style="align-self:center">Checks your solution against all ${tcs.length} test case(s).</span>
         </div>
         <div class="console-out hidden" id="console-out"></div>
+        <div class="tc-panel">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <div style="font-size:13px;font-weight:700">🧪 Test Cases (${tcs.length})</div>
+          </div>
+          <div class="tc-tabs">${tcTabsHtml}</div>
+          <div class="tc-view">${tcBodyHtml}</div>
+        </div>
       </div>`;
   }
 
@@ -734,6 +833,49 @@ function saveCurrentCode() {
   if (q.type === 'output') saveCode(q.id);
 }
 
+function switchTcTab(qid, tabIdx) {
+  if (!quizState) return;
+  saveCurrentCode();
+  quizState.activeTcTab[qid] = tabIdx;
+  renderQuiz();
+}
+
+async function runTestCases(qid) {
+  saveCurrentCode();
+  const btn = $('#test-run-btn');
+  const code = quizState.answers[qid] || '';
+  const language = quizState.answers[`${qid}_lang`] || quizState.questions[quizState.idx].language || 'javascript';
+  if (!code.trim()) {
+    toast('Please write some code first.', 'error');
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Testing code…';
+  }
+  try {
+    const res = await api(`/api/questions/${qid}/test-run`, {
+      method: 'POST',
+      body: { code, language },
+    });
+    quizState.testResults[qid] = res;
+    if (res.summary.all_passed) {
+      toast(`🎉 All ${res.summary.total} test cases passed!`, 'success');
+    } else if (res.summary.error) {
+      toast('Execution error in test cases.', 'error');
+    } else {
+      toast(`${res.summary.passed_count}/${res.summary.total} test cases passed.`, 'info');
+    }
+    renderQuiz();
+  } catch (e) {
+    toast(e.message, 'error');
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '▶ Run & Check Test Cases';
+    }
+  }
+}
+
 async function runCode(qid) {
   saveCurrentCode();
   const btn = $('#run-btn');
@@ -806,19 +948,23 @@ function viewResult(attemptId) {
   api(`/api/attempts/${attemptId}/result`).then(({ attempt, details, rank, participants }) => {
     const totalPts = details.reduce((a, d) => a + d.points, 0);
     const pct = totalPts ? Math.round((attempt.score / totalPts) * 100) : 0;
-    const reviews = details.map((d, i) => `
+    const reviews = details.map((d, i) => {
+      const tcCount = d.test_cases ? d.test_cases.length : (d.total_test_cases || 0);
+      const earned = d.earned_points !== undefined ? d.earned_points : (d.correct ? d.points : 0);
+      return `
       <div class="review-item ${d.correct ? 'ok' : 'bad'}">
         <div class="rv-head">
           <span>${d.correct ? '✅' : '❌'}</span>
           <span>Q${i + 1}. ${esc(d.prompt.slice(0, 120))}${d.prompt.length > 120 ? '…' : ''}</span>
-          <span class="badge ${d.correct ? 'badge-live' : 'badge-ended'}" style="margin-left:auto">${d.correct ? '+' + d.points : '0'} pts</span>
+          <span class="badge ${d.correct ? 'badge-live' : 'badge-ended'}" style="margin-left:auto">${earned}/${d.points} pts</span>
         </div>
         <div class="rv-detail">
           ${d.type === 'mcq'
             ? `Your answer: <b>${esc(d.given || '(not answered)')}</b><br/>Correct answer: <b>${esc(d.answer)}</b>`
-            : `Expected output: <b>${esc(d.answer)}</b><br/>Your submitted code:<pre>${esc(d.given || '(not answered)')}</pre>`}
+            : `${tcCount > 0 ? `Test cases: <b>${tcCount} test case(s) evaluated</b><br/>` : ''}Expected output: <b>${esc(d.answer)}</b><br/>Your submitted code:<pre>${esc(d.given || '(not answered)')}</pre>`}
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
     const verdict = pct >= 70 ? '🔥 Outstanding performance!' : pct >= 40 ? '👍 Good effort — keep training!' : '💪 Practice makes perfect — try again!';
     $('#app').innerHTML = `
@@ -1307,7 +1453,9 @@ function viewAdminEditComp(id) {
       type: q.type, prompt: q.prompt,
       options: q.options || ['', ''],
       answer_index: q.options ? Math.max(0, q.options.indexOf(q.answer)) : 0,
-      answer: q.answer, starter_code: q.starter_code || '', points: q.points,
+      answer: q.answer,
+      test_cases: q.test_cases && q.test_cases.length ? q.test_cases : (q.type === 'output' ? [{ input: '', output: q.answer || '', hidden: false }] : undefined),
+      starter_code: q.starter_code || '', points: q.points,
       language: q.language || 'javascript',
     }));
     if (!qbQuestions.length) qbQuestions.push({ type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10, language: 'javascript' });
@@ -1380,8 +1528,23 @@ function syncQbFromDom() {
       q.answer_index = checked ? parseInt(checked.value, 10) : 0;
     } else {
       q.language = $('.q-lang-select', el)?.value ?? q.language ?? 'javascript';
-      q.answer = $('.q-answer-input', el)?.value ?? q.answer;
       q.starter_code = $('.q-starter-input', el)?.value ?? q.starter_code;
+      const tcCards = $$('.tc-builder-card', el);
+      if (tcCards.length > 0) {
+        q.test_cases = tcCards.map((cEl) => {
+          const inp = $('.q-tc-input', cEl)?.value ?? '';
+          const out = $('.q-tc-output', cEl)?.value ?? '';
+          const hid = $('.q-tc-hidden', cEl)?.checked ?? false;
+          return { input: inp, output: out, hidden: hid };
+        });
+        q.answer = q.test_cases[0] ? q.test_cases[0].output : (q.answer || '');
+      } else {
+        const singleOut = $('.q-answer-input', el)?.value;
+        if (singleOut !== undefined) {
+          q.answer = singleOut;
+          q.test_cases = [{ input: '', output: singleOut, hidden: false }];
+        }
+      }
     }
   });
 }
@@ -1391,6 +1554,9 @@ function renderQList(editable = true) {
   if (!list) return;
   list.innerHTML = qbQuestions.map((q, i) => {
     const qLang = q.language || 'javascript';
+    if (q.type === 'output' && (!q.test_cases || !q.test_cases.length)) {
+      q.test_cases = [{ input: '', output: q.answer || '', hidden: false }];
+    }
     const typeUi = q.type === 'mcq'
       ? `
         <div id="opts-${i}">
@@ -1411,14 +1577,44 @@ function renderQList(editable = true) {
               ${SUPPORTED_LANGUAGES.map((l) => `<option value="${l.id}" ${qLang === l.id ? 'selected' : ''}>${l.icon} ${l.label}</option>`).join('')}
             </select>
           </div>
-          <div class="field" style="flex:2">
-            <label>Expected output <span class="req">*</span></label>
-            <input class="input mono q-answer-input" value="${esc(q.answer)}" placeholder="e.g. 55" ${editable ? '' : 'disabled'} />
-          </div>
         </div>
         <div class="field"><label>Starter code shown to students</label>
-          <textarea class="code-editor q-starter-input" style="min-height:110px" placeholder="// code template" ${editable ? '' : 'disabled'}>${esc(q.starter_code || '')}</textarea></div>
-        <p class="faint">Students solve in the selected language; their stdout is compared against expected output (ignoring extra whitespace &amp; case).</p>`;
+          <textarea class="code-editor q-starter-input" style="min-height:95px" placeholder="// code template" ${editable ? '' : 'disabled'}>${esc(q.starter_code || '')}</textarea></div>
+        <div style="margin-top:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:8px;flex-wrap:wrap">
+            <label style="font-weight:700;font-size:13.5px">🧪 Test Cases (${(q.test_cases || []).length}) <span class="req">*</span></label>
+            ${editable ? `<button type="button" class="btn btn-ghost btn-sm" onclick="addTestCase(${i})">＋ Add Test Case</button>` : ''}
+          </div>
+          <p class="faint" style="margin-top:-4px;margin-bottom:12px">Student code is executed and verified against each test case. Mark cases as "Hidden" so students don't see secret inputs/outputs during the competition.</p>
+          <div id="tc-list-${i}">
+            ${(q.test_cases || [{ input: '', output: q.answer || '', hidden: false }]).map((tc, ti) => `
+              <div class="tc-builder-card">
+                <div class="tc-builder-head">
+                  <span style="font-weight:600;font-size:13px">
+                    Test Case #${ti + 1}
+                    ${tc.hidden ? '<span class="badge" style="margin-left:6px">🔒 Hidden</span>' : '<span class="badge badge-info" style="margin-left:6px">Sample</span>'}
+                  </span>
+                  <div style="display:flex;align-items:center;gap:12px">
+                    <label style="font-size:12.5px;display:flex;align-items:center;gap:5px;cursor:pointer">
+                      <input type="checkbox" class="q-tc-hidden" ${tc.hidden ? 'checked' : ''} onchange="syncQbFromDom(); qbQuestions[${i}].test_cases[${ti}].hidden = this.checked; renderQList();" ${editable ? '' : 'disabled'} />
+                      Hidden from students
+                    </label>
+                    ${editable && (q.test_cases || []).length > 1 ? `<button type="button" class="btn btn-danger btn-sm" onclick="removeTestCase(${i}, ${ti})">✕ Remove</button>` : ''}
+                  </div>
+                </div>
+                <div class="form-row">
+                  <div class="field" style="flex:1">
+                    <label style="font-size:12px">Input (stdin) <span class="faint">(optional / empty if none)</span></label>
+                    <textarea class="input mono q-tc-input" style="min-height:55px" placeholder="Standard input (e.g. 5 3)" ${editable ? '' : 'disabled'}>${esc(tc.input || '')}</textarea>
+                  </div>
+                  <div class="field" style="flex:1">
+                    <label style="font-size:12px">Expected Output (stdout) <span class="req">*</span></label>
+                    <textarea class="input mono q-tc-output" style="min-height:55px" placeholder="Expected output (e.g. 8)" ${editable ? '' : 'disabled'}>${esc(tc.output || '')}</textarea>
+                  </div>
+                </div>
+              </div>`).join('')}
+          </div>
+        </div>`;
     return `
       <div class="q-builder-item">
         <div class="qb-head">
@@ -1448,6 +1644,7 @@ function addQuestion(type) {
     options: type === 'mcq' ? ['', ''] : undefined,
     answer_index: 0,
     answer: '',
+    test_cases: type === 'output' ? [{ input: '', output: '', hidden: false }] : undefined,
     starter_code: type === 'output' ? DEFAULT_STARTER_CODE.javascript : '',
     points: 10,
     language: 'javascript',
@@ -1464,7 +1661,25 @@ function setType(i, type) {
   if (type === 'output') {
     q.language = q.language || 'javascript';
     if (!q.starter_code) q.starter_code = DEFAULT_STARTER_CODE[q.language];
+    if (!q.test_cases || !q.test_cases.length) {
+      q.test_cases = [{ input: '', output: q.answer || '', hidden: false }];
+    }
   }
+  renderQList();
+}
+function addTestCase(qi) {
+  syncQbFromDom();
+  const q = qbQuestions[qi];
+  if (!q) return;
+  if (!q.test_cases) q.test_cases = [];
+  q.test_cases.push({ input: '', output: '', hidden: q.test_cases.length >= 1 });
+  renderQList();
+}
+function removeTestCase(qi, ti) {
+  syncQbFromDom();
+  const q = qbQuestions[qi];
+  if (!q || !q.test_cases) return;
+  q.test_cases.splice(ti, 1);
   renderQList();
 }
 function addOption(i) { syncQbFromDom(); qbQuestions[i].options.push(''); renderQList(); }

@@ -219,17 +219,21 @@ const JUDGE0_LANGUAGES = {
 
 const JUDGE0_BASE_URL = process.env.JUDGE0_URL || 'https://ce.judge0.com';
 
-function runJavaScript(code) {
+function runJavaScript(code, stdin = '') {
   return new Promise((resolve) => {
-    const child = execFile(process.execPath, ['-e', code], { timeout: 2500, killSignal: 'SIGKILL', windowsHide: true }, (err, stdout, stderr) => {
-      if (err && err.killed) return resolve({ ok: false, error: '⏱ Time limit exceeded (2.5s).', stdout: '' });
+    const child = execFile(process.execPath, ['-e', code], { timeout: 3500, killSignal: 'SIGKILL', windowsHide: true }, (err, stdout, stderr) => {
+      if (err && err.killed) return resolve({ ok: false, error: '⏱ Time limit exceeded (3.5s).', stdout: '' });
       if (err && !stdout && stderr) return resolve({ ok: false, error: String(stderr).slice(0, 2000), stdout: '' });
       resolve({ ok: !err, error: err && !err.killed ? String(stderr || err.message).slice(0, 2000) : '', stdout: String(stdout || '').slice(0, 10000) });
     });
+    if (stdin) {
+      try { child.stdin.write(stdin); } catch {}
+    }
+    try { child.stdin.end(); } catch {}
   });
 }
 
-async function runWithJudge0(code, language) {
+async function runWithJudge0(code, language, stdin = '') {
   const langKey = String(language || 'python').toLowerCase().trim();
   const langId = JUDGE0_LANGUAGES[langKey] || JUDGE0_LANGUAGES.python;
 
@@ -243,13 +247,18 @@ async function runWithJudge0(code, language) {
       headers['X-RapidAPI-Host'] = 'judge0-ce.p.rapidapi.com';
     }
 
+    const payload = {
+      source_code: code,
+      language_id: langId,
+    };
+    if (stdin) {
+      payload.stdin = String(stdin);
+    }
+
     const res = await fetch(`${JUDGE0_BASE_URL}/submissions?base64_encoded=false&wait=true`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        source_code: code,
-        language_id: langId,
-      }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
@@ -288,23 +297,106 @@ async function runWithJudge0(code, language) {
   }
 }
 
-async function runCode(code, language = 'javascript') {
+async function runCode(code, language = 'javascript', stdin = '') {
   const lang = String(language || 'javascript').toLowerCase().trim();
   if (lang === 'javascript' || lang === 'js') {
-    return runJavaScript(code);
+    return runJavaScript(code, stdin);
   }
-  return runWithJudge0(code, lang);
+  return runWithJudge0(code, lang, stdin);
 }
 
 const normalize = (s) => String(s ?? '').trim().replace(/\r\n/g, '\n').split('\n').map((l) => l.trimEnd()).join('\n').toLowerCase();
 
+function parseTestCases(q) {
+  if (q && q.test_cases_json) {
+    try {
+      const parsed = typeof q.test_cases_json === 'string' ? JSON.parse(q.test_cases_json) : q.test_cases_json;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map((tc) => ({
+          input: String(tc.input ?? ''),
+          output: String(tc.output ?? '').trim(),
+          hidden: Boolean(tc.hidden),
+        }));
+      }
+    } catch {}
+  }
+  if (q && q.answer && q.type === 'output') {
+    return [{ input: '', output: String(q.answer).trim(), hidden: false }];
+  }
+  return [];
+}
+
 app.post('/api/run', requireAuth, async (req, res) => {
   const code = String(req.body?.code || '');
   const language = String(req.body?.language || 'javascript').toLowerCase();
+  const stdin = String(req.body?.stdin || '');
   if (!code.trim()) return res.status(400).json({ error: 'Write some code first.' });
   if (code.length > 20000) return res.status(400).json({ error: 'Code is too long (20,000 char limit).' });
-  const result = await runCode(code, language);
+  const result = await runCode(code, language, stdin);
   res.json(result);
+});
+
+/* Run student's code against a question's configured test cases */
+app.post('/api/questions/:id/test-run', requireAuth, async (req, res) => {
+  const q = await db.prepare('SELECT * FROM questions WHERE id = ?').get(req.params.id);
+  if (!q) return res.status(404).json({ error: 'Question not found.' });
+  if (q.type !== 'output') return res.status(400).json({ error: 'Test cases are only available for practical questions.' });
+
+  const code = String(req.body?.code || '');
+  const language = String(req.body?.language || q.language || 'javascript').toLowerCase();
+  if (!code.trim()) return res.status(400).json({ error: 'Write some code first.' });
+  if (code.length > 20000) return res.status(400).json({ error: 'Code is too long (20,000 char limit).' });
+
+  const testCases = parseTestCases(q);
+  if (!testCases.length) {
+    return res.status(400).json({ error: 'No test cases configured for this question.' });
+  }
+
+  const cases = [];
+  let compileOrRuntimeError = null;
+
+  for (let i = 0; i < testCases.length; i++) {
+    const tc = testCases[i];
+    const run = await runCode(code, language, tc.input);
+    const actualNorm = normalize(run.stdout);
+    const expectedNorm = normalize(tc.output);
+    const passed = run.ok && actualNorm === expectedNorm;
+
+    if (!run.ok && !compileOrRuntimeError) {
+      compileOrRuntimeError = run.error || 'Execution error';
+    }
+
+    if (tc.hidden) {
+      cases.push({
+        case_number: i + 1,
+        hidden: true,
+        passed,
+        error: run.ok ? null : (run.error || 'Execution error'),
+      });
+    } else {
+      cases.push({
+        case_number: i + 1,
+        hidden: false,
+        input: tc.input,
+        expected: tc.output,
+        actual: run.stdout,
+        passed,
+        error: run.ok ? null : (run.error || 'Execution error'),
+      });
+    }
+  }
+
+  const passedCount = cases.filter((c) => c.passed).length;
+  res.json({
+    ok: true,
+    summary: {
+      total: cases.length,
+      passed_count: passedCount,
+      all_passed: passedCount === cases.length,
+      error: compileOrRuntimeError,
+    },
+    cases,
+  });
 });
 
 /* ------------------------------------------------------------------ */
@@ -488,6 +580,12 @@ app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req,
       starter_code: q.starter_code,
       points: q.points,
       language: q.language || 'javascript',
+      test_cases: parseTestCases(q).map((tc, idx) => ({
+        case_number: idx + 1,
+        input: tc.hidden ? null : tc.input,
+        output: tc.hidden ? null : tc.output,
+        hidden: tc.hidden,
+      })),
       // answer intentionally omitted
     })),
   });
@@ -506,19 +604,54 @@ async function gradeAttempt(attemptId, answers, autoSubmit = false) {
   for (const q of questions) {
     const given = answers[q.id] !== undefined && answers[q.id] !== null ? String(answers[q.id]) : '';
     let ok = false;
+    let earnedPoints = 0;
+    let passedCount = 0;
+    let totalCases = 0;
+    const testResults = [];
+
     if (given.trim()) {
       if (q.type === 'mcq') {
         ok = normalize(given) === normalize(q.answer);
+        if (ok) earnedPoints = q.points;
       } else {
-        // practical: run the student's code and compare stdout with expected output
+        // practical: evaluate against all test cases for this question
+        const testCases = parseTestCases(q);
+        totalCases = testCases.length;
         const qLang = answers[`${q.id}_lang`] || q.language || 'javascript';
-        const run = await runCode(given, qLang);
-        ok = run.ok && normalize(run.stdout) === normalize(q.answer);
+        for (let tIdx = 0; tIdx < testCases.length; tIdx++) {
+          const tc = testCases[tIdx];
+          const run = await runCode(given, qLang, tc.input);
+          const passed = run.ok && normalize(run.stdout) === normalize(tc.output);
+          if (passed) passedCount++;
+          testResults.push({
+            case_number: tIdx + 1,
+            hidden: tc.hidden,
+            passed,
+            input: tc.hidden ? null : tc.input,
+            expected: tc.hidden ? null : tc.output,
+            actual: tc.hidden ? null : run.stdout,
+          });
+        }
+        ok = totalCases > 0 && passedCount === totalCases;
+        earnedPoints = totalCases > 0 ? Math.round((passedCount / totalCases) * q.points) : (ok ? q.points : 0);
       }
     }
-    if (ok) { score += q.points; correct += 1; }
+    if (ok) correct += 1;
+    score += earnedPoints;
     await insertAns.run(attemptId, q.id, given.slice(0, 20000), ok ? 1 : 0);
-    details.push({ question_id: q.id, type: q.type, prompt: q.prompt, given, answer: q.answer, correct: ok, points: q.points });
+    details.push({
+      question_id: q.id,
+      type: q.type,
+      prompt: q.prompt,
+      given,
+      answer: q.answer,
+      correct: ok,
+      points: q.points,
+      earned_points: earnedPoints,
+      passed_test_cases: passedCount,
+      total_test_cases: totalCases,
+      test_results: testResults,
+    });
   }
 
   const started = new Date(attempt.started_at).getTime();
@@ -555,11 +688,20 @@ app.get('/api/attempts/:id/result', requireAuth, async (req, res) => {
     return res.status(403).json({ error: 'This is not your attempt.' });
   }
   const detailRows = await db.prepare(`
-    SELECT aa.question_id, aa.answer_text AS given, aa.is_correct, q.type, q.prompt, q.answer, q.points
+    SELECT aa.question_id, aa.answer_text AS given, aa.is_correct, q.type, q.prompt, q.answer, q.points, q.language, q.test_cases_json
     FROM attempt_answers aa JOIN questions q ON q.id = aa.question_id
     WHERE aa.attempt_id = ? ORDER BY q.sort_order, q.id
   `).all(attempt.id);
-  const details = detailRows.map((d) => ({ ...d, correct: Boolean(d.is_correct) }));
+  const details = detailRows.map((d) => ({
+    ...d,
+    correct: Boolean(d.is_correct),
+    test_cases: parseTestCases(d).map((tc, idx) => ({
+      case_number: idx + 1,
+      input: tc.input,
+      output: tc.output,
+      hidden: tc.hidden,
+    })),
+  }));
   const lb = await leaderboardFor(attempt.competition_id);
   const me = lb.find((r) => r.user_id === attempt.user_id);
   res.json({ attempt, details, rank: me ? me.rank : null, participants: lb.length });
@@ -649,12 +791,37 @@ function validateQuestions(list) {
       if (!Number.isInteger(answerIdx) || answerIdx < 0 || answerIdx >= options.length) {
         return { error: `Question ${i + 1}: select the correct option.` };
       }
-      clean.push({ type, prompt, options_json: JSON.stringify(options), answer: options[answerIdx], starter_code: null, points });
+      clean.push({ type, prompt, options_json: JSON.stringify(options), answer: options[answerIdx], starter_code: null, points, test_cases_json: null });
     } else {
-      const expected = String(q.answer || '').trim();
-      if (!expected) return { error: `Question ${i + 1}: expected output is required.` };
       const lang = String(q.language || 'javascript').toLowerCase().trim();
-      clean.push({ type, prompt, options_json: null, answer: expected, starter_code: String(q.starter_code || ''), points, language: lang });
+      let testCases = [];
+      if (Array.isArray(q.test_cases)) {
+        testCases = q.test_cases
+          .map((tc) => ({
+            input: String(tc.input ?? ''),
+            output: String(tc.output ?? '').trim(),
+            hidden: Boolean(tc.hidden),
+          }))
+          .filter((tc) => tc.output.length > 0);
+      }
+      const singleExpected = String(q.answer || '').trim();
+      if (testCases.length === 0 && !singleExpected) {
+        return { error: `Question ${i + 1}: at least one test case with expected output is required.` };
+      }
+      if (testCases.length === 0) {
+        testCases.push({ input: '', output: singleExpected, hidden: false });
+      }
+      const primaryAnswer = testCases[0].output;
+      clean.push({
+        type,
+        prompt,
+        options_json: null,
+        answer: primaryAnswer,
+        starter_code: String(q.starter_code || ''),
+        points,
+        language: lang,
+        test_cases_json: JSON.stringify(testCases),
+      });
     }
   }
   return { questions: clean };
@@ -672,12 +839,12 @@ app.post('/api/admin/competitions', requireAuth, requireAdmin, async (req, res) 
   `).run(v.title, v.description, v.batch_year, v.starts_at, v.ends_at, v.duration_minutes, req.user.id, new Date().toISOString());
   const id = r.lastInsertRowid;
   const ins = db.prepare(`
-    INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order, language)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order, language, test_cases_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (let i = 0; i < qv.questions.length; i++) {
     const q = qv.questions[i];
-    await ins.run(id, q.type, q.prompt, q.options_json, q.answer, q.starter_code, q.points, i, q.language || 'javascript');
+    await ins.run(id, q.type, q.prompt, q.options_json, q.answer, q.starter_code, q.points, i, q.language || 'javascript', q.test_cases_json);
   }
   res.status(201).json({ id });
 });
@@ -716,7 +883,11 @@ app.get('/api/admin/competitions/:id', requireAuth, requireAdmin, async (req, re
   const comp = await db.prepare('SELECT * FROM competitions WHERE id = ?').get(req.params.id);
   if (!comp) return res.status(404).json({ error: 'Competition not found.' });
   const qrows = await db.prepare('SELECT * FROM questions WHERE competition_id = ? ORDER BY sort_order, id').all(comp.id);
-  const questions = qrows.map((q) => ({ ...q, options: q.options_json ? JSON.parse(q.options_json) : null }));
+  const questions = qrows.map((q) => ({
+    ...q,
+    options: q.options_json ? JSON.parse(q.options_json) : null,
+    test_cases: parseTestCases(q),
+  }));
   const attempts = (await db.prepare("SELECT COUNT(*) AS n FROM attempts WHERE competition_id = ? AND status = 'submitted'").get(comp.id)).n;
   res.json({ competition: { ...comp, status: competitionStatus(comp), participant_count: attempts }, questions });
 });
@@ -735,12 +906,12 @@ app.put('/api/admin/competitions/:id', requireAuth, requireAdmin, async (req, re
     if (qv.error) return res.status(400).json({ error: qv.error });
     await db.prepare('DELETE FROM questions WHERE competition_id = ?').run(comp.id);
     const ins = db.prepare(`
-      INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order, language)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order, language, test_cases_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (let i = 0; i < qv.questions.length; i++) {
       const q = qv.questions[i];
-      await ins.run(comp.id, q.type, q.prompt, q.options_json, q.answer, q.starter_code, q.points, i, q.language || 'javascript');
+      await ins.run(comp.id, q.type, q.prompt, q.options_json, q.answer, q.starter_code, q.points, i, q.language || 'javascript', q.test_cases_json);
     }
   }
   res.json({ ok: true, questions_locked: hasAttempts });
