@@ -339,6 +339,7 @@ function viewDashboard() {
             <h3 class="comp-title">${esc(c.title)}</h3>
             <p class="comp-desc">${esc(c.description || 'No description provided.')}</p>
             <div class="comp-meta">
+              <span class="chip">🎓 ${c.batch_year ? esc(c.batch_year) + ' Batch' : 'All Batches'}</span>
               <span class="chip">❓ ${c.question_count} questions</span>
               <span class="chip">🎯 ${c.total_points} pts</span>
               <span class="chip">⏱ ${c.duration_minutes} min</span>
@@ -473,6 +474,7 @@ function viewCompetition(id) {
           <h1 style="margin-top:12px">${esc(c.title)}</h1>
           <p class="muted" style="line-height:1.7;max-width:760px">${esc(c.description)}</p>
           <div class="details-grid">
+            <div class="detail-box"><div class="db-label">Eligible Batch</div><div class="db-value">🎓 ${c.batch_year ? esc(c.batch_year) + ' Batch' : 'All Batches'}</div></div>
             <div class="detail-box"><div class="db-label">Starts</div><div class="db-value">${fmtDateFull(c.starts_at)}</div></div>
             <div class="detail-box"><div class="db-label">Ends</div><div class="db-value">${fmtDateFull(c.ends_at)}</div></div>
             <div class="detail-box"><div class="db-label">Duration</div><div class="db-value">⏱ ${c.duration_minutes} minutes</div></div>
@@ -880,6 +882,7 @@ function viewLeaderboardPicker() {
         ${statusBadge(c.status)}
         <h3 class="comp-title">${esc(c.title)}</h3>
         <div class="comp-meta">
+          <span class="chip">🎓 ${c.batch_year ? esc(c.batch_year) + ' Batch' : 'All Batches'}</span>
           <span class="chip">👥 ${c.participant_count} participants</span>
           ${c.my_rank ? `<span class="chip" style="color:var(--cyan)">Your rank: ${medal(c.my_rank)}</span>` : '<span class="chip">Not participated</span>'}
         </div>
@@ -1073,6 +1076,7 @@ function viewAdmin() {
     const rows = comps.competitions.map((c) => `
       <tr>
         <td><b>${esc(c.title)}</b><div class="faint">${esc(c.description || '').slice(0, 80)}</div></td>
+        <td>${c.batch_year ? `<span class="badge badge-info">🎓 ${esc(c.batch_year)}</span>` : '<span class="badge">All Batches</span>'}</td>
         <td>${statusBadge(c.status)}</td>
         <td>${c.question_count} <span class="faint">(${c.total_points} pts)</span></td>
         <td>${c.registration_count}</td>
@@ -1103,7 +1107,7 @@ function viewAdmin() {
           <button class="btn btn-ghost btn-sm" onclick="location.hash='#/admin/students'">👥 View all students →</button></div>
         ${comps.competitions.length ? `
           <div class="table-wrap"><table class="lb">
-            <thead><tr><th>Title</th><th>Status</th><th>Questions</th><th>Registered</th><th>Submitted</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Title</th><th>Batch</th><th>Status</th><th>Questions</th><th>Registered</th><th>Submitted</th><th>Actions</th></tr></thead>
             <tbody>${rows}</tbody></table></div>`
           : '<div class="card empty-state"><div class="es-ico">📭</div>No competitions yet — create your first one!</div>'}
 
@@ -1292,7 +1296,7 @@ function viewAdminNewComp() {
   qbQuestions = [
     { type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10, language: 'javascript' },
   ];
-  renderCompForm({ title: '', description: '', starts_at: toLocalInput(new Date(Date.now() + 3600e3)), ends_at: toLocalInput(new Date(Date.now() + 4 * 3600e3)), duration_minutes: 30 }, false);
+  renderCompForm({ title: '', description: '', batch_year: '', starts_at: toLocalInput(new Date(Date.now() + 3600e3)), ends_at: toLocalInput(new Date(Date.now() + 4 * 3600e3)), duration_minutes: 30 }, false);
 }
 
 function viewAdminEditComp(id) {
@@ -1309,6 +1313,7 @@ function viewAdminEditComp(id) {
     if (!qbQuestions.length) qbQuestions.push({ type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10, language: 'javascript' });
     renderCompForm({
       title: competition.title, description: competition.description,
+      batch_year: competition.batch_year || '',
       starts_at: toLocalInput(competition.starts_at), ends_at: toLocalInput(competition.ends_at),
       duration_minutes: competition.duration_minutes,
     }, true, competition);
@@ -1329,6 +1334,8 @@ function renderCompForm(c, isEdit, comp = null) {
           <input class="input" id="c-title" value="${esc(c.title)}" placeholder="e.g. CodeSprint: Python Basics" /></div>
         <div class="field"><label>Description</label>
           <textarea class="input" id="c-desc" placeholder="What is this competition about?">${esc(c.description)}</textarea></div>
+        <div class="field"><label>Target Batch Year <span class="faint">(e.g. 2024 or leave blank for all batches)</span></label>
+          <input class="input" id="c-batch" value="${esc(c.batch_year || '')}" placeholder="e.g. 2024 (leave blank for all students)" /></div>
         <div class="form-row">
           <div class="field"><label>Starts at (your local time) <span class="req">*</span></label>
             <input class="input" type="datetime-local" id="c-start" value="${esc(c.starts_at)}" /></div>
@@ -1480,6 +1487,7 @@ async function saveComp(id) {
   const body = {
     title: $('#c-title').value,
     description: $('#c-desc').value,
+    batch_year: $('#c-batch') ? $('#c-batch').value.trim() : null,
     starts_at: startsAt,
     ends_at: endsAt,
     duration_minutes: $('#c-dur').value,

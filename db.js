@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS competitions (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   title            TEXT NOT NULL,
   description      TEXT NOT NULL DEFAULT '',
+  batch_year       TEXT,
   starts_at        TEXT NOT NULL,
   ends_at          TEXT NOT NULL,
   duration_minutes INTEGER NOT NULL DEFAULT 30,
@@ -311,6 +312,13 @@ async function init() {
     try {
       try {
         await client.execute('SELECT 1 FROM users LIMIT 1');
+        try {
+          await client.execute('SELECT batch_year FROM competitions LIMIT 1');
+        } catch {
+          try {
+            await client.execute('ALTER TABLE competitions ADD COLUMN batch_year TEXT');
+          } catch {}
+        }
         isDbReady = true;
         return;
       } catch {
@@ -322,6 +330,9 @@ async function init() {
       } catch {
         // column already exists
       }
+      try {
+        await client.execute('ALTER TABLE competitions ADD COLUMN batch_year TEXT');
+      } catch {}
       await seed();
       isDbReady = true;
     } catch (e) {

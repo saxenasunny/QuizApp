@@ -371,7 +371,15 @@ app.get('/api/competitions', requireAuth, async (req, res) => {
   const attMap = Object.fromEntries(atts.map((a) => [a.competition_id, a]));
   const rankMap = Object.fromEntries(ranks.map((r) => [r.competition_id, r.rank]));
 
-  const data = comps.map((c) => ({
+  // Filter competitions by student's batch_year if user is a student
+  const visibleComps = req.user.role === 'admin'
+    ? comps
+    : comps.filter((c) => {
+        if (!c.batch_year || !c.batch_year.trim() || c.batch_year.toLowerCase() === 'all') return true;
+        return String(req.user.batch_year || '').trim() === c.batch_year.trim();
+      });
+
+  const data = visibleComps.map((c) => ({
     ...c,
     status: competitionStatus(c),
     registered: regSet.has(c.id),
@@ -385,6 +393,11 @@ app.get('/api/competitions/:id', requireAuth, async (req, res) => {
   const compId = req.params.id;
   const comp = await db.prepare('SELECT * FROM competitions WHERE id = ?').get(compId);
   if (!comp) return res.status(404).json({ error: 'Competition not found.' });
+  if (req.user.role === 'student' && comp.batch_year && comp.batch_year.trim() && comp.batch_year.toLowerCase() !== 'all') {
+    if (String(req.user.batch_year || '').trim() !== comp.batch_year.trim()) {
+      return res.status(403).json({ error: `This competition is only open to students from the ${comp.batch_year} batch.` });
+    }
+  }
   const [q, reg, att, lb] = await Promise.all([
     db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(points),0) AS pts FROM questions WHERE competition_id = ?').get(compId),
     db.prepare('SELECT id FROM registrations WHERE competition_id = ? AND user_id = ?').get(compId, req.user.id),
@@ -410,6 +423,11 @@ app.get('/api/competitions/:id', requireAuth, async (req, res) => {
 app.post('/api/competitions/:id/register', requireAuth, requireProfile, async (req, res) => {
   const comp = await db.prepare('SELECT * FROM competitions WHERE id = ?').get(req.params.id);
   if (!comp) return res.status(404).json({ error: 'Competition not found.' });
+  if (req.user.role === 'student' && comp.batch_year && comp.batch_year.trim() && comp.batch_year.toLowerCase() !== 'all') {
+    if (String(req.user.batch_year || '').trim() !== comp.batch_year.trim()) {
+      return res.status(403).json({ error: `Registration is only open to students from the ${comp.batch_year} batch.` });
+    }
+  }
   const existing = await db.prepare('SELECT id FROM registrations WHERE competition_id = ? AND user_id = ?').get(comp.id, req.user.id);
   if (!existing) {
     await db.prepare('INSERT INTO registrations (competition_id, user_id, created_at) VALUES (?, ?, ?)')
@@ -422,6 +440,11 @@ app.post('/api/competitions/:id/register', requireAuth, requireProfile, async (r
 app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req, res) => {
   const comp = await db.prepare('SELECT * FROM competitions WHERE id = ?').get(req.params.id);
   if (!comp) return res.status(404).json({ error: 'Competition not found.' });
+  if (req.user.role === 'student' && comp.batch_year && comp.batch_year.trim() && comp.batch_year.toLowerCase() !== 'all') {
+    if (String(req.user.batch_year || '').trim() !== comp.batch_year.trim()) {
+      return res.status(403).json({ error: `This competition is only open to students from the ${comp.batch_year} batch.` });
+    }
+  }
   const status = competitionStatus(comp);
   if (status === 'upcoming') return res.status(400).json({ error: 'This competition has not started yet.' });
   if (status === 'ended') return res.status(400).json({ error: 'This competition has ended.' });
@@ -597,6 +620,7 @@ app.get('/api/me/participations', requireAuth, async (req, res) => {
 function validateCompetitionPayload(b) {
   const title = String(b.title || '').trim();
   const description = String(b.description || '').trim();
+  const batchYear = b.batch_year !== undefined && b.batch_year !== null ? String(b.batch_year).trim() : null;
   const startsAt = b.starts_at ? new Date(b.starts_at) : null;
   const endsAt = b.ends_at ? new Date(b.ends_at) : null;
   const duration = parseInt(b.duration_minutes, 10);
@@ -605,7 +629,7 @@ function validateCompetitionPayload(b) {
   if (!endsAt || isNaN(endsAt.getTime())) return { error: 'Valid end date/time is required.' };
   if (endsAt.getTime() <= startsAt.getTime()) return { error: 'End time must be after start time.' };
   if (!Number.isFinite(duration) || duration < 1 || duration > 480) return { error: 'Duration must be between 1 and 480 minutes.' };
-  return { title, description, starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(), duration_minutes: duration };
+  return { title, description, batch_year: batchYear || null, starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(), duration_minutes: duration };
 }
 
 function validateQuestions(list) {
@@ -643,9 +667,9 @@ app.post('/api/admin/competitions', requireAuth, requireAdmin, async (req, res) 
   if (qv.error) return res.status(400).json({ error: qv.error });
 
   const r = await db.prepare(`
-    INSERT INTO competitions (title, description, starts_at, ends_at, duration_minutes, created_by, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(v.title, v.description, v.starts_at, v.ends_at, v.duration_minutes, req.user.id, new Date().toISOString());
+    INSERT INTO competitions (title, description, batch_year, starts_at, ends_at, duration_minutes, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(v.title, v.description, v.batch_year, v.starts_at, v.ends_at, v.duration_minutes, req.user.id, new Date().toISOString());
   const id = r.lastInsertRowid;
   const ins = db.prepare(`
     INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order, language)
@@ -702,8 +726,8 @@ app.put('/api/admin/competitions/:id', requireAuth, requireAdmin, async (req, re
   if (!comp) return res.status(404).json({ error: 'Competition not found.' });
   const v = validateCompetitionPayload({ ...comp, ...(req.body || {}) });
   if (v.error) return res.status(400).json({ error: v.error });
-  await db.prepare('UPDATE competitions SET title = ?, description = ?, starts_at = ?, ends_at = ?, duration_minutes = ? WHERE id = ?')
-    .run(v.title, v.description, v.starts_at, v.ends_at, v.duration_minutes, comp.id);
+  await db.prepare('UPDATE competitions SET title = ?, description = ?, batch_year = ?, starts_at = ?, ends_at = ?, duration_minutes = ? WHERE id = ?')
+    .run(v.title, v.description, v.batch_year, v.starts_at, v.ends_at, v.duration_minutes, comp.id);
 
   const hasAttempts = (await db.prepare('SELECT COUNT(*) AS n FROM attempts WHERE competition_id = ?').get(comp.id)).n > 0;
   if (!hasAttempts && req.body.questions) {
