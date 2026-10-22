@@ -227,16 +227,8 @@ function viewLogin() {
           <button class="btn btn-primary btn-block" type="submit">Log In →</button>
         </form>
         <p class="muted" style="font-size:13.5px;margin-top:16px">New student? <a class="link" href="#/register">Create an account</a></p>
-        <div class="demo-box">
-          <b>Demo accounts</b><br/>
-          👨‍🎓 Student: <code data-fill="aarav@student.campus.edu">aarav@student.campus.edu</code> / <code data-fill="demo1234">demo1234</code><br/>
-          🛠️ Admin: <code data-fill="admin@codingarena.dev">admin@codingarena.dev</code> / <code data-fill="admin123">admin123</code>
-        </div>
       </div>
     </div>`;
-  $$('.demo-box code').forEach((c) => c.addEventListener('click', () => {
-    navigator.clipboard?.writeText(c.textContent).then(() => toast('Copied: ' + c.textContent));
-  }));
   $('#login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -994,6 +986,44 @@ function viewOverall() {
    ============================================================ */
 function viewProfile() {
   renderNav('#/profile');
+  if (ME.role === 'admin') {
+    $('#app').innerHTML = `
+      <div class="page-enter" style="max-width:620px;margin:0 auto">
+        <a class="link" href="#/admin">← Admin panel</a>
+        <h1 style="margin-top:10px">🛠️ Administrator Profile</h1>
+        <p class="muted" style="margin-bottom:20px">Manage your administrator account credentials.</p>
+        <div class="card">
+          <form id="admin-profile-form">
+            <div class="field"><label>Admin Name <span class="req">*</span></label>
+              <input class="input" name="name" value="${esc(ME.name || '')}" placeholder="Administrator" required /></div>
+            <div class="field"><label>Email (User ID)</label>
+              <input class="input" value="${esc(ME.email)}" disabled style="opacity:0.75;cursor:not-allowed" /></div>
+            <hr class="divider"/>
+            <h3>🔒 Change Admin Password</h3>
+            <p class="muted" style="font-size:13px;margin:-4px 0 12px">Leave blank if you do not wish to change your password.</p>
+            <div class="field"><label>New Password</label>
+              <input class="input" type="password" name="password" minlength="6" placeholder="Minimum 6 characters" /></div>
+            <button class="btn btn-primary" type="submit" style="margin-top:6px">Save Admin Profile</button>
+          </form>
+        </div>
+      </div>`;
+    $('#admin-profile-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = Object.fromEntries(new FormData(e.target).entries());
+      if (fd.password && fd.password.trim().length < 6) {
+        toast('New password must be at least 6 characters.', 'error');
+        return;
+      }
+      try {
+        const { user } = await api('/api/profile', { method: 'PUT', body: fd });
+        ME = user;
+        try { localStorage.setItem('coding_arena_user', JSON.stringify(user)); } catch {}
+        toast('Admin profile updated! ✅', 'success');
+        location.hash = '#/admin';
+      } catch (err) { toast(err.message, 'error'); }
+    });
+    return;
+  }
   const f = (name, label, val, ph = '') => `
     <div class="field"><label>${label}</label>
     <input class="input" name="${name}" value="${esc(val || '')}" placeholder="${ph}" /></div>`;
@@ -1057,7 +1087,10 @@ function viewAdmin() {
       <div class="page-enter">
         <div class="section-head" style="margin-top:6px">
           <div><h1>🛠️ Admin Panel</h1><p class="muted">Create coding competitions and monitor every ranking.</p></div>
-          <button class="btn btn-primary" onclick="location.hash='#/admin/new'">＋ Create Competition</button>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-ghost" onclick="openAdminPasswordModal()">🔑 Change Password</button>
+            <button class="btn btn-primary" onclick="location.hash='#/admin/new'">＋ Create Competition</button>
+          </div>
         </div>
         <div class="grid grid-4">
           <div class="card stat-card"><div class="stat-val">${ov.students}</div><div class="stat-label">Students</div></div>
@@ -1125,6 +1158,9 @@ function viewAdminStudents() {
         <td>${s.stats.competitions_attempted}</td>
         <td class="score-cell">${s.stats.total_score}</td>
         <td class="rank-num">${s.stats.rank ? medal(s.stats.rank) : '—'}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="openStudentPasswordModal(${s.id}, '${esc(s.name || s.email).replace(/'/g, "\\'")}', '${esc(s.email).replace(/'/g, "\\'")}')">🔑 Change Password</button>
+        </td>
       </tr>`).join('');
     $('#app').innerHTML = `
       <div class="page-enter">
@@ -1132,10 +1168,109 @@ function viewAdminStudents() {
         <h1 style="margin-top:10px">👥 All Students</h1>
         <p class="muted" style="margin-bottom:18px">${students.length} registered students with their overall performance.</p>
         <div class="table-wrap"><table class="lb">
-          <thead><tr><th>Student</th><th>Enrollment / Admission</th><th>School</th><th>Program</th><th>Profile</th><th>Competitions</th><th>Points</th><th>Rank</th></tr></thead>
+          <thead><tr><th>Student</th><th>Enrollment / Admission</th><th>School</th><th>Program</th><th>Profile</th><th>Competitions</th><th>Points</th><th>Rank</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody></table></div>
       </div>`;
   }).catch((e) => { toast(e.message, 'error'); location.hash = '#/admin'; });
+}
+
+/* ---------- password management modals ---------- */
+function closeModal() {
+  const m = $('#modal-root');
+  if (m) m.innerHTML = '';
+}
+
+function openAdminPasswordModal() {
+  const root = $('#modal-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <h2 style="margin:0;font-size:19px">🔑 Change Admin Password</h2>
+          <button class="btn btn-ghost btn-sm" type="button" onclick="closeModal()" style="padding:4px 8px">✕</button>
+        </div>
+        <p class="muted" style="font-size:13.5px;margin:-4px 0 16px">Set a new password for the administrator account (<b>${esc(ME.email)}</b>).</p>
+        <form id="admin-pwd-form">
+          <div class="field">
+            <label>New Password <span class="req">*</span></label>
+            <input class="input" type="password" id="admin-new-pwd" minlength="6" placeholder="Minimum 6 characters" required autofocus />
+          </div>
+          <div class="field">
+            <label>Confirm New Password <span class="req">*</span></label>
+            <input class="input" type="password" id="admin-confirm-pwd" minlength="6" placeholder="Repeat new password" required />
+          </div>
+          <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
+            <button class="btn btn-ghost" type="button" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" type="submit">Update Password</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+
+  $('#admin-pwd-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const p1 = $('#admin-new-pwd').value;
+    const p2 = $('#admin-confirm-pwd').value;
+    if (p1 !== p2) {
+      toast('Passwords do not match.', 'error');
+      return;
+    }
+    try {
+      await api('/api/admin/password', { method: 'PUT', body: { new_password: p1 } });
+      toast('Admin password updated successfully! 🔑', 'success');
+      closeModal();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
+}
+
+function openStudentPasswordModal(studentId, studentName, studentEmail) {
+  const root = $('#modal-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <h2 style="margin:0;font-size:19px">🔑 Change Student Password</h2>
+          <button class="btn btn-ghost btn-sm" type="button" onclick="closeModal()" style="padding:4px 8px">✕</button>
+        </div>
+        <p class="muted" style="font-size:13.5px;margin:-4px 0 16px">
+          Setting new password for: <b style="color:var(--cyan)">${esc(studentName)}</b><br/>
+          <span class="faint">Email / User ID: ${esc(studentEmail)}</span>
+        </p>
+        <form id="student-pwd-form">
+          <div class="field">
+            <label>New Password <span class="req">*</span></label>
+            <div style="display:flex;gap:8px">
+              <input class="input" type="text" id="student-new-pwd" minlength="6" placeholder="Minimum 6 characters" required style="flex:1" autofocus />
+              <button class="btn btn-ghost btn-sm" type="button" onclick="$('#student-new-pwd').value='Pass@' + Math.floor(1000 + Math.random()*9000); toast('Generated password!', 'info');">🎲 Generate</button>
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px">
+            <button class="btn btn-ghost" type="button" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" type="submit">Save Password</button>
+          </div>
+        </form>
+      </div>
+    </div>`;
+
+  $('#student-pwd-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pwd = $('#student-new-pwd').value.trim();
+    if (pwd.length < 6) {
+      toast('Password must be at least 6 characters.', 'error');
+      return;
+    }
+    try {
+      await api(`/api/admin/students/${studentId}/password`, { method: 'PUT', body: { password: pwd } });
+      toast(`Password updated for ${studentName}! ✅`, 'success');
+      closeModal();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
 }
 
 /* ---------- competition builder (create / edit) ---------- */

@@ -761,6 +761,38 @@ app.get('/api/admin/competitions/:id/submissions', requireAuth, requireAdmin, as
   res.json({ leaderboard: await leaderboardFor(comp.id) });
 });
 
+app.put('/api/admin/password', requireAuth, requireAdmin, async (req, res) => {
+  const newPassword = String(req.body?.new_password || '').trim();
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  }
+  await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), req.user.id);
+  const updated = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  const token = parseCookies(req).sid;
+  if (token) sessionCache.set(token, { user: updated, cachedAt: Date.now() });
+  res.json({ ok: true, message: 'Admin password updated successfully.' });
+});
+
+app.put('/api/admin/students/:id/password', requireAuth, requireAdmin, async (req, res) => {
+  const studentId = parseInt(req.params.id, 10);
+  const newPassword = String(req.body?.password || '').trim();
+  if (!newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  }
+  const user = await db.prepare('SELECT id, email, name, role FROM users WHERE id = ?').get(studentId);
+  if (!user) {
+    return res.status(404).json({ error: 'Student not found.' });
+  }
+  await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(newPassword), studentId);
+  // Clear cached sessions for this student
+  for (const [token, s] of sessionCache.entries()) {
+    if (s.user && s.user.id === studentId) {
+      sessionCache.delete(token);
+    }
+  }
+  res.json({ ok: true, message: `Password updated for ${user.name || user.email}.` });
+});
+
 /* ------------------------------------------------------------------ */
 /* SPA fallback (local only; on Vercel the CDN serves public/)         */
 /* ------------------------------------------------------------------ */
