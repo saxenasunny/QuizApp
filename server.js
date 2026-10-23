@@ -283,8 +283,11 @@ async function runWithJudge0(code, language, stdin = '') {
       return { ok: false, error: stderr.slice(0, 2000), stdout: '' };
     }
     if (data.status && data.status.id > 3) {
-      const errMsg = stderr || data.status.description || 'Execution failed';
-      return { ok: false, error: errMsg.slice(0, 2000), stdout };
+      let errMsg = (stderr || data.status.description || 'Execution failed').slice(0, 2000);
+      if (errMsg.includes('NoSuchElementException')) {
+        errMsg += '\n\n💡 Hint: NoSuchElementException occurred while reading input. Scanner reached End-of-File (EOF). Check that your input/test cases provide all required values.';
+      }
+      return { ok: false, error: errMsg, stdout };
     }
 
     return { ok: true, error: stderr.slice(0, 1000), stdout: stdout.slice(0, 10000) };
@@ -305,43 +308,45 @@ async function runWithCodapi(code, language, stdin = '') {
   try {
     let sandbox = 'python';
     let files = {};
+    const stdinStr = String(stdin ?? '');
+    const inputContent = stdinStr.endsWith('\n') ? stdinStr : (stdinStr ? stdinStr + '\n' : '');
+    const hasStdin = stdinStr.trim().length > 0;
 
     if (langKey === 'python' || langKey === 'py') {
       sandbox = 'python';
       let wrappedCode = code;
-      if (stdin !== undefined && stdin !== null && stdin !== '') {
-        wrappedCode = `import io, sys\nsys.stdin = io.StringIO(${JSON.stringify(String(stdin))})\n${code}`;
+      if (hasStdin) {
+        wrappedCode = `import io, sys\nsys.stdin = io.StringIO(${JSON.stringify(inputContent)})\n${code}`;
       }
       files = { '': wrappedCode };
     } else if (langKey === 'c') {
       sandbox = 'gcc';
       let wrappedCode = code;
-      if (stdin !== undefined && stdin !== null && stdin !== '') {
+      if (hasStdin) {
         wrappedCode = `#include <stdio.h>\n#define main __student_main__\n${code}\n#undef main\nint main(int argc, char** argv) {\n    freopen("input.txt", "r", stdin);\n    return __student_main__();\n}`;
-        files = { '': wrappedCode, 'input.txt': String(stdin) };
+        files = { '': wrappedCode, 'input.txt': inputContent };
       } else {
         files = { '': code };
       }
     } else if (langKey === 'cpp' || langKey === 'c++') {
       sandbox = 'cpp';
       let wrappedCode = code;
-      if (stdin !== undefined && stdin !== null && stdin !== '') {
+      if (hasStdin) {
         wrappedCode = `#include <iostream>\n#include <cstdio>\n#define main __student_main__\n${code}\n#undef main\nint main(int argc, char** argv) {\n    freopen("input.txt", "r", stdin);\n    return __student_main__();\n}`;
-        files = { '': wrappedCode, 'input.txt': String(stdin) };
+        files = { '': wrappedCode, 'input.txt': inputContent };
       } else {
         files = { '': code };
       }
     } else if (langKey === 'java') {
       sandbox = 'java';
       let wrappedCode = code;
-      if (stdin !== undefined && stdin !== null && stdin !== '') {
-        wrappedCode = code.replace(/public\s+class\s+\w+\s*\{/, (match) => {
-          return `${match}\n  static { try { if (new java.io.File("input.txt").exists()) System.setIn(new java.io.FileInputStream("input.txt")); } catch(Exception e){} }\n`;
+      const classRegex = /(?:public\s+)?class\s+[A-Za-z0-9_$]+[^{]*\{/;
+      if (classRegex.test(code)) {
+        wrappedCode = code.replace(classRegex, (match) => {
+          return `${match} static { try { if (new java.io.File("input.txt").exists()) System.setIn(new java.io.FileInputStream("input.txt")); } catch (Throwable _e) {} }`;
         });
-        files = { '': wrappedCode, 'input.txt': String(stdin) };
-      } else {
-        files = { '': code };
       }
+      files = { '': wrappedCode, 'input.txt': inputContent };
     } else {
       sandbox = 'python';
       files = { '': code };
@@ -369,7 +374,11 @@ async function runWithCodapi(code, language, stdin = '') {
     const stderr = data.stderr ? String(data.stderr) : '';
 
     if (!data.ok) {
-      return { ok: false, error: (stderr || 'Execution failed').slice(0, 3000), stdout };
+      let errMsg = (stderr || 'Execution failed').slice(0, 3000);
+      if (errMsg.includes('NoSuchElementException')) {
+        errMsg += '\n\n💡 Hint: NoSuchElementException occurred while reading input. Scanner reached End-of-File (EOF). Check that your input/test cases provide all required values.';
+      }
+      return { ok: false, error: errMsg, stdout };
     }
 
     return { ok: true, error: stderr.slice(0, 1000), stdout: stdout.slice(0, 10000) };

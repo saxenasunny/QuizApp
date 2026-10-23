@@ -882,11 +882,32 @@ async function runCode(qid) {
   const out = $('#console-out');
   const code = quizState.answers[qid] || '';
   const language = quizState.answers[`${qid}_lang`] || quizState.questions[quizState.idx].language || 'javascript';
+
+  // Automatically pass the active test case's input for practical questions
+  const q = quizState.questions ? quizState.questions[quizState.idx] : null;
+  let stdin = '';
+  let caseLabel = '';
+  if (q && q.type === 'output') {
+    const tcs = q.test_cases && q.test_cases.length ? q.test_cases : [];
+    const activeTab = (quizState.activeTcTab && quizState.activeTcTab[qid] !== undefined) ? quizState.activeTcTab[qid] : 0;
+    const activeTc = tcs[activeTab] || tcs[0];
+    if (activeTc && !activeTc.hidden) {
+      stdin = activeTc.input || '';
+      caseLabel = ` with Case ${activeTab + 1} input`;
+    } else {
+      const nonHidden = tcs.find((t) => !t.hidden);
+      if (nonHidden) {
+        stdin = nonHidden.input || '';
+        caseLabel = ' with sample input';
+      }
+    }
+  }
+
   btn.disabled = true; btn.textContent = '⏳ Running…';
   out.classList.remove('hidden', 'ok', 'err');
-  out.textContent = `Running your ${language} code…`;
+  out.textContent = `Running your ${language} code${caseLabel}…`;
   try {
-    const r = await api('/api/run', { method: 'POST', body: { code, language } });
+    const r = await api('/api/run', { method: 'POST', body: { code, language, stdin } });
     if (r.ok) {
       out.classList.add('ok');
       out.textContent = '✔ Finished successfully\n\n' + (r.stdout || `(no output — did you forget ${getPrintHint(language)}?)`);
