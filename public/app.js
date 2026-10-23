@@ -1238,6 +1238,7 @@ function viewAdmin() {
         <div class="section-head" style="margin-top:6px">
           <div><h1>🛠️ Admin Panel</h1><p class="muted">Create coding competitions and monitor every ranking.</p></div>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-ghost" onclick="downloadQuestionTemplate()">📥 Bulk Template</button>
             <button class="btn btn-ghost" onclick="openAdminPasswordModal()">🔑 Change Password</button>
             <button class="btn btn-primary" onclick="location.hash='#/admin/new'">＋ Create Competition</button>
           </div>
@@ -1500,9 +1501,13 @@ function renderCompForm(c, isEdit, comp = null) {
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
           <h3 style="margin:0">❓ Questions</h3>
           ${locked ? '' : `
-            <div style="display:flex;gap:9px">
-              <button class="btn btn-ghost btn-sm" onclick="addQuestion('mcq')">＋ Objective (MCQ)</button>
-              <button class="btn btn-ghost btn-sm" onclick="addQuestion('output')">＋ Practical (output)</button>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button type="button" class="btn btn-ghost btn-sm" onclick="downloadQuestionTemplate()">📥 Download Template</button>
+              <label class="btn btn-ghost btn-sm" style="margin:0;cursor:pointer;display:inline-flex;align-items:center;gap:5px">
+                📤 Bulk Upload <input type="file" id="bulk-upload-input" accept=".csv,.json" style="display:none" onchange="handleBulkQuestionUpload(event)" />
+              </label>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="addQuestion('mcq')">＋ Objective (MCQ)</button>
+              <button type="button" class="btn btn-ghost btn-sm" onclick="addQuestion('output')">＋ Practical (output)</button>
             </div>`}
         </div>
         ${locked ? '<p class="faint" style="margin-top:10px">Students have already attempted this competition — questions are locked, but you can still edit the schedule.</p>' : ''}
@@ -1684,6 +1689,269 @@ function removeTestCase(qi, ti) {
 }
 function addOption(i) { syncQbFromDom(); qbQuestions[i].options.push(''); renderQList(); }
 function removeOption(i, oi) { syncQbFromDom(); qbQuestions[i].options.splice(oi, 1); qbQuestions[i].answer_index = 0; renderQList(); }
+
+function downloadQuestionTemplate() {
+  const csvRows = [
+    'type,prompt,points,option_a,option_b,option_c,option_d,correct_answer,language,starter_code,test_case_1_input,test_case_1_output,test_case_2_input,test_case_2_output,test_case_2_hidden',
+    'mcq,"What is the output of typeof null in JavaScript?",10,"""object""","""null""","""undefined""","""boolean""","A",,,,',
+    'mcq,"Which data structure operates on a Last In, First Out (LIFO) basis?",10,"Queue","Stack","Array","Linked List","B",,,,',
+    'practical,"Write a Python program that reads two space-separated numbers from input and prints their sum.",20,,,,,"","python","# Read two numbers and print sum\na, b = map(int, input().split())\nprint(a + b)","5 3","8","10 20","30","TRUE"',
+    'practical,"Write a program that prints the square of an integer read from stdin.",15,,,,,"","python","n = int(input())\nprint(n * n)","4","16","9","81","FALSE"'
+  ];
+  const csvContent = csvRows.join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'cryptic_quiz_questions_template.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Template downloaded! Fill questions in Excel/Sheets, save as CSV, and upload.', 'info');
+}
+
+function parseCSV(text) {
+  const rows = [];
+  let row = [];
+  let inQuotes = false;
+  let cur = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (inQuotes) {
+      if (c === '"') {
+        if (next === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += c;
+      }
+    } else {
+      if (c === '"') {
+        inQuotes = true;
+      } else if (c === ',') {
+        row.push(cur.trim());
+        cur = '';
+      } else if (c === '\r') {
+        // ignore CR
+      } else if (c === '\n') {
+        row.push(cur.trim());
+        if (row.some((cell) => cell.length > 0)) rows.push(row);
+        row = [];
+        cur = '';
+      } else {
+        cur += c;
+      }
+    }
+  }
+  if (cur.length > 0 || row.length > 0) {
+    row.push(cur.trim());
+    if (row.some((cell) => cell.length > 0)) rows.push(row);
+  }
+  return rows;
+}
+
+async function handleBulkQuestionUpload(e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+
+  const fileName = file.name.toLowerCase();
+  const reader = new FileReader();
+
+  reader.onload = (evt) => {
+    try {
+      const content = evt.target.result;
+      let parsedQuestions = [];
+
+      if (fileName.endsWith('.json')) {
+        const rawJson = JSON.parse(content);
+        if (!Array.isArray(rawJson)) throw new Error('JSON file must contain an array of question objects.');
+        parsedQuestions = rawJson.map((q, idx) => {
+          const rawType = (q.type || '').toLowerCase();
+          const isPractical = rawType.includes('pract') || rawType.includes('code') || rawType === 'output';
+          const prompt = String(q.prompt || `Question ${idx + 1}`).trim();
+          const points = parseInt(q.points, 10) || 10;
+          if (!isPractical) {
+            const options = Array.isArray(q.options) && q.options.length ? q.options.map(String) : ['Option A', 'Option B'];
+            let answer = String(q.answer || options[0]);
+            let answerIndex = options.indexOf(answer);
+            if (answerIndex === -1) {
+              const letterIdx = ['a', 'b', 'c', 'd', 'e', 'f'].indexOf(answer.toLowerCase().trim());
+              answerIndex = letterIdx >= 0 && letterIdx < options.length ? letterIdx : 0;
+              answer = options[answerIndex];
+            }
+            return { type: 'mcq', prompt, options, answer_index: answerIndex, answer, points };
+          } else {
+            let lang = String(q.language || 'python').toLowerCase().trim();
+            if (lang === 'js') lang = 'javascript';
+            if (lang === 'py') lang = 'python';
+            if (lang === 'c++') lang = 'cpp';
+            if (!SUPPORTED_LANGUAGES.some((l) => l.id === lang)) lang = 'python';
+
+            const starter_code = q.starter_code || DEFAULT_STARTER_CODE[lang] || '';
+            const tcs = Array.isArray(q.test_cases) && q.test_cases.length
+              ? q.test_cases.map((t) => ({ input: String(t.input ?? ''), output: String(t.output ?? ''), hidden: Boolean(t.hidden) }))
+              : [{ input: '', output: String(q.answer || '0'), hidden: false }];
+            return {
+              type: 'output',
+              prompt,
+              points,
+              language: lang,
+              starter_code,
+              test_cases: tcs,
+              answer: tcs[0] ? tcs[0].output : '0',
+            };
+          }
+        });
+      } else {
+        // Parse CSV
+        const rows = parseCSV(content);
+        if (rows.length < 2) throw new Error('CSV file has no data rows.');
+        const rawHeaders = rows[0];
+        const headers = rawHeaders.map((h) => h.toLowerCase().trim().replace(/[\s_-]+/g, ''));
+        const getCol = (r, name) => {
+          const norm = name.toLowerCase().replace(/[\s_-]+/g, '');
+          const idx = headers.indexOf(norm);
+          return idx !== -1 ? r[idx] || '' : '';
+        };
+
+        for (let ri = 1; ri < rows.length; ri++) {
+          const r = rows[ri];
+          const rawType = (getCol(r, 'type') || '').toLowerCase();
+          const prompt = getCol(r, 'prompt') || `Question ${ri}`;
+          const points = parseInt(getCol(r, 'points'), 10) || 10;
+          const isPractical = rawType.includes('pract') || rawType.includes('code') || rawType === 'output';
+
+          if (!isPractical) {
+            // MCQ Question
+            let options = [];
+            const genericOpts = getCol(r, 'options');
+            if (genericOpts && genericOpts.includes('|')) {
+              options = genericOpts.split('|').map((o) => o.trim()).filter(Boolean);
+            } else {
+              const optA = getCol(r, 'option_a') || getCol(r, 'option1');
+              const optB = getCol(r, 'option_b') || getCol(r, 'option2');
+              const optC = getCol(r, 'option_c') || getCol(r, 'option3');
+              const optD = getCol(r, 'option_d') || getCol(r, 'option4');
+              options = [optA, optB, optC, optD].filter((o) => o && o.length > 0);
+            }
+            if (options.length < 2) options = ['Option A', 'Option B'];
+
+            const rawAns = getCol(r, 'correct_answer') || getCol(r, 'answer') || 'A';
+            let answerIndex = 0;
+            const letterIdx = ['a', 'b', 'c', 'd'].indexOf(rawAns.toLowerCase().trim());
+            if (letterIdx >= 0 && letterIdx < options.length) {
+              answerIndex = letterIdx;
+            } else {
+              const matchIdx = options.findIndex((o) => o.toLowerCase() === rawAns.toLowerCase());
+              if (matchIdx !== -1) answerIndex = matchIdx;
+            }
+            parsedQuestions.push({
+              type: 'mcq',
+              prompt,
+              points,
+              options,
+              answer_index: answerIndex,
+              answer: options[answerIndex] || options[0],
+            });
+          } else {
+            // Practical Question
+            let lang = (getCol(r, 'language') || 'python').toLowerCase().trim();
+            if (lang === 'js') lang = 'javascript';
+            if (lang === 'py') lang = 'python';
+            if (lang === 'c++') lang = 'cpp';
+            if (!SUPPORTED_LANGUAGES.some((l) => l.id === lang)) lang = 'python';
+
+            const starter_code = getCol(r, 'starter_code') || DEFAULT_STARTER_CODE[lang] || '';
+            const test_cases = [];
+
+            const tc1Out = getCol(r, 'test_case_1_output') || getCol(r, 'tc1output');
+            const tc1In = getCol(r, 'test_case_1_input') || getCol(r, 'tc1input');
+            const tc1Hid = getCol(r, 'test_case_1_hidden') || getCol(r, 'tc1hidden');
+            if (tc1Out) {
+              test_cases.push({
+                input: tc1In,
+                output: tc1Out,
+                hidden: tc1Hid.toLowerCase() === 'true' || tc1Hid === '1',
+              });
+            }
+
+            const tc2Out = getCol(r, 'test_case_2_output') || getCol(r, 'tc2output');
+            const tc2In = getCol(r, 'test_case_2_input') || getCol(r, 'tc2input');
+            const tc2Hid = getCol(r, 'test_case_2_hidden') || getCol(r, 'tc2hidden');
+            if (tc2Out) {
+              test_cases.push({
+                input: tc2In,
+                output: tc2Out,
+                hidden: tc2Hid.toLowerCase() === 'true' || tc2Hid === '1',
+              });
+            }
+
+            const tc3Out = getCol(r, 'test_case_3_output') || getCol(r, 'tc3output');
+            const tc3In = getCol(r, 'test_case_3_input') || getCol(r, 'tc3input');
+            const tc3Hid = getCol(r, 'test_case_3_hidden') || getCol(r, 'tc3hidden');
+            if (tc3Out) {
+              test_cases.push({
+                input: tc3In,
+                output: tc3Out,
+                hidden: tc3Hid.toLowerCase() === 'true' || tc3Hid === '1',
+              });
+            }
+
+            if (!test_cases.length) {
+              const singleAns = getCol(r, 'correct_answer') || getCol(r, 'answer') || '0';
+              test_cases.push({ input: '', output: singleAns, hidden: false });
+            }
+
+            parsedQuestions.push({
+              type: 'output',
+              prompt,
+              points,
+              language: lang,
+              starter_code,
+              test_cases,
+              answer: test_cases[0].output,
+            });
+          }
+        }
+      }
+
+      if (!parsedQuestions.length) throw new Error('No valid questions found in the uploaded file.');
+
+      syncQbFromDom();
+
+      // If existing questions have real prompts or multiple questions, ask replace or append
+      const hasRealExisting = qbQuestions.length > 1 || (qbQuestions[0] && qbQuestions[0].prompt && qbQuestions[0].prompt.trim().length > 0);
+      if (hasRealExisting) {
+        if (confirm(`You have existing questions in the editor.\n\nClick OK to REPLACE them with the ${parsedQuestions.length} uploaded question(s).\nClick Cancel to APPEND to your existing questions.`)) {
+          qbQuestions = parsedQuestions;
+        } else {
+          qbQuestions = qbQuestions.concat(parsedQuestions);
+        }
+      } else {
+        qbQuestions = parsedQuestions;
+      }
+
+      renderQList();
+      toast(`🎉 Successfully imported ${parsedQuestions.length} question(s)! Review them below.`, 'success');
+    } catch (err) {
+      toast(`Upload failed: ${err.message}`, 'error');
+    } finally {
+      e.target.value = ''; // Reset input so same file can be re-selected if edited
+    }
+  };
+
+  reader.onerror = () => {
+    toast('Failed to read the file.', 'error');
+    e.target.value = '';
+  };
+
+  reader.readAsText(file);
+}
 
 async function saveComp(id) {
   syncQbFromDom();
