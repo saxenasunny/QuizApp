@@ -314,7 +314,7 @@ tr.me-row { background: rgba(139, 92, 246, 0.11) !important; outline: 1px solid 
 .option.selected .opt-key { background: var(--grad); color: #07101c; }
 .code-area { position: relative; }
 .code-editor {
-  width: 100%; min-height: 190px; border-radius: 13px; padding: 16px 18px;
+  width: 100%; min-height: 380px; height: 380px; border-radius: 13px; padding: 16px 18px;
   font-family: var(--mono); font-size: 13.8px; line-height: 1.75; tab-size: 2;
   background: #05070f; border: 1px solid var(--border-strong); color: #d7e1f5; outline: none; resize: vertical;
   -webkit-touch-callout: none;
