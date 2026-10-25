@@ -1261,6 +1261,7 @@ function viewAdmin() {
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <button class="btn btn-ghost" onclick="downloadQuestionTemplate()">📥 Bulk Template</button>
             <button class="btn btn-ghost" onclick="openAdminPasswordModal()">🔑 Change Password</button>
+            <button class="btn btn-ghost" style="border-color:rgba(248,113,113,0.35);color:var(--red)" onclick="confirmPurgeData()">🗑️ Reset All Data</button>
             <button class="btn btn-primary" onclick="location.hash='#/admin/new'">＋ Create Competition</button>
           </div>
         </div>
@@ -1311,6 +1312,21 @@ async function deleteComp(id, title) {
     toast('Competition deleted.', 'success');
     viewAdmin();
   } catch (e) { toast(e.message, 'error'); }
+}
+
+async function confirmPurgeData() {
+  const confirmation = prompt('⚠️ DANGER: This will permanently ERASE all competitions, questions, submissions, and student accounts so you can launch completely fresh with new students.\n\nType "RESET" to confirm:');
+  if (confirmation !== 'RESET') {
+    if (confirmation !== null) toast('Action cancelled — confirmation text did not match "RESET".', 'info');
+    return;
+  }
+  try {
+    const res = await api('/api/admin/purge-data', { method: 'POST' });
+    toast(res.message || 'All dummy data erased successfully!', 'success');
+    viewAdmin();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
 }
 
 function viewAdminStudents() {

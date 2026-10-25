@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { execFile } = require('child_process');
 
-const { db, init, hashPassword, verifyPassword, competitionStatus, isProfileComplete } = require('./db');
+const { db, init, hashPassword, verifyPassword, competitionStatus, isProfileComplete, purgeAllDummyData } = require('./db');
 
 const app = express();
 const PORT = (() => {
@@ -1078,6 +1078,20 @@ app.put('/api/admin/students/:id/password', requireAuth, requireAdmin, async (re
     }
   }
   res.json({ ok: true, message: `Password updated for ${user.name || user.email}.` });
+});
+
+app.post('/api/admin/purge-data', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    await purgeAllDummyData();
+    for (const [token, s] of sessionCache.entries()) {
+      if (s.user && s.user.role !== 'admin') {
+        sessionCache.delete(token);
+      }
+    }
+    res.json({ ok: true, message: 'All student accounts, competitions, and attempts have been erased.' });
+  } catch (err) {
+    res.status(500).json({ error: `Purge failed: ${err.message}` });
+  }
 });
 
 /* ------------------------------------------------------------------ */

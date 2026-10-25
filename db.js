@@ -162,143 +162,73 @@ function iso(offsetMs) {
 }
 
 async function seed() {
-  const { c } = await db.prepare('SELECT COUNT(*) AS c FROM users').get();
-  if (c > 0) return; // already seeded
-
-  const HOUR = 3600 * 1000;
-  const DAY = 24 * HOUR;
-  const insertUser = db.prepare(`
-    INSERT INTO users (email, password_hash, role, name, enrollment_no, admission_no,
-                       school_name, program_name, section, batch_year, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  // Admin account
-  await insertUser.run('admin@codingarena.dev', hashPassword('admin123'), 'admin',
-    'Competition Admin', null, null, 'School of Computer Science', null, null, null, iso(-30 * DAY));
-
-  // Demo students (password for all: demo1234)
-  const pw = hashPassword('demo1234');
-  const students = [
-    ['aarav@student.campus.edu',  'Aarav Sharma', 'ENR2023001', 'ADM1001', 'School of Computer Science', 'B.Tech CSE', 'A', '2023'],
-    ['priya@student.campus.edu',  'Priya Verma',  'ENR2023002', 'ADM1002', 'School of Computer Science', 'B.Tech CSE', 'A', '2023'],
-    ['rohan@student.campus.edu',  'Rohan Das',    'ENR2022014', 'ADM1014', 'School of Information Tech',  'B.Tech IT',  'B', '2022'],
-    ['sneha@student.campus.edu',  'Sneha Iyer',   'ENR2024031', 'ADM1031', 'School of Computer Science', 'BCA',        'A', '2024'],
-    ['kabir@student.campus.edu',  'Kabir Mehta',  'ENR2023009', 'ADM1009', 'School of Computer Science', 'B.Tech CSE', 'B', '2023'],
-    ['ananya@student.campus.edu', 'Ananya Rao',   'ENR2025005', 'ADM1005', 'School of Applied Sciences', 'MCA',        'A', '2025'],
-  ];
-  const studentIds = {};
-  for (const [email, name, enr, adm, school, program, section, batch] of students) {
-    const r = await insertUser.run(email, pw, 'student', name, enr, adm, school, program, section, batch, iso(-20 * DAY));
-    studentIds[email] = r.lastInsertRowid;
+  const admin = await db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+  if (!admin) {
+    const insertUser = db.prepare(`
+      INSERT INTO users (email, password_hash, role, name, enrollment_no, admission_no,
+                         school_name, program_name, section, batch_year, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    await insertUser.run(
+      'admin@codingarena.dev',
+      hashPassword('admin123'),
+      'admin',
+      'Competition Admin',
+      null,
+      null,
+      'School of Computer Science',
+      null,
+      null,
+      null,
+      new Date().toISOString()
+    );
+    console.log('Seeded default admin account.');
   }
+}
 
-  const adminId = (await db.prepare('SELECT id FROM users WHERE role = ?').get('admin')).id;
+async function purgeAllDummyData() {
+  // Wipe attempt answers, attempts, registrations, questions, competitions
+  await client.execute('DELETE FROM attempt_answers');
+  await client.execute('DELETE FROM attempts');
+  await client.execute('DELETE FROM registrations');
+  await client.execute('DELETE FROM questions');
+  await client.execute('DELETE FROM competitions');
 
-  const addComp = db.prepare(`
-    INSERT INTO competitions (title, description, starts_at, ends_at, duration_minutes, created_by, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-  const addQ = db.prepare(`
-    INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+  // Delete all student sessions and student users
+  await client.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE role = 'student')");
+  await client.execute("DELETE FROM users WHERE role = 'student'");
 
-  /* ---------- Competition 1: LIVE right now ---------- */
-  const comp1 = (await addComp.run(
-    'CodeSprint: JavaScript Fundamentals',
-    'A fast-paced sprint through the core of JavaScript — types, arrays, scope and hands-on output problems. Write real code and get instant verdicts!',
-    iso(-2 * HOUR), iso(6 * HOUR), 30, adminId, iso(-1 * DAY)
-  )).lastInsertRowid;
+  // Ensure admin account exists
+  await seed();
+  return { ok: true };
+}
 
-  const q1 = [
-    ['mcq', 'What is the output of `typeof null` in JavaScript?', JSON.stringify(['"object"', '"null"', '"undefined"', '"number"']), '"object"', null, 10],
-    ['mcq', 'Which array method adds one or more elements to the END of an array?', JSON.stringify(['pop()', 'shift()', 'push()', 'unshift()']), 'push()', null, 10],
-    ['mcq', 'What does the strict equality operator (===) compare?', JSON.stringify(['Only values', 'Only types', 'Both value and type, no type coercion', 'Value after type coercion']), 'Both value and type, no type coercion', null, 10],
-    ['mcq', 'Which keyword declares a block-scoped variable whose binding CAN be reassigned?', JSON.stringify(['var', 'let', 'const', 'static']), 'let', null, 10],
-    ['output', 'Write a JavaScript program that prints the sum of numbers from 1 to 10.', null, '55',
-      '// Print the sum of numbers from 1 to 10\nconsole.log();\n', 20],
-    ['output', 'Given the array below, print only the EVEN numbers separated by a single space.', null, '2 4 6',
-      'const arr = [1, 2, 3, 4, 5, 6];\n// print only even numbers, space separated\nconsole.log();\n', 20],
-  ];
-  for (let i = 0; i < q1.length; i++) { const q = q1[i]; await addQ.run(comp1, q[0], q[1], q[2], q[3], q[4], q[5], i); }
+async function runLaunchCleanup() {
+  try {
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS system_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      )
+    `);
 
-  /* ---------- Competition 2: UPCOMING ---------- */
-  const comp2 = (await addComp.run(
-    'Algorithm Arena: Data Structures',
-    'Test your mastery of arrays, linked lists, stacks, queues and complexity analysis. Objective questions with a practical coding finale.',
-    iso(5 * DAY), iso(5 * DAY + 3 * HOUR), 45, adminId, iso(-2 * DAY)
-  )).lastInsertRowid;
+    const existing = await client.execute({
+      sql: 'SELECT name FROM system_migrations WHERE name = ?',
+      args: ['clean_launch_dummy_data_v1']
+    });
 
-  const q2 = [
-    ['mcq', 'What is the worst-case time complexity of searching in a balanced Binary Search Tree?', JSON.stringify(['O(1)', 'O(log n)', 'O(n)', 'O(n²)']), 'O(log n)', null, 10],
-    ['mcq', 'Which data structure follows the LIFO (Last In, First Out) principle?', JSON.stringify(['Queue', 'Stack', 'Linked List', 'Heap']), 'Stack', null, 10],
-    ['mcq', 'Which traversal of a BST returns keys in ascending order?', JSON.stringify(['Pre-order', 'In-order', 'Post-order', 'Level-order']), 'In-order', null, 10],
-    ['mcq', 'A queue typically grows and shrinks from which ends?', JSON.stringify(['Both from the back', 'Enqueue at rear, dequeue from front', 'Both from the front', 'Random access only']), 'Enqueue at rear, dequeue from front', null, 10],
-    ['mcq', 'What is the average time complexity of inserting at the HEAD of a singly linked list?', JSON.stringify(['O(1)', 'O(log n)', 'O(n)', 'O(n log n)']), 'O(1)', null, 10],
-    ['output', 'Print the FACTORIAL of 5 (i.e. 5!).', null, '120',
-      '// Print the factorial of 5\nconsole.log();\n', 20],
-  ];
-  for (let i = 0; i < q2.length; i++) { const q = q2[i]; await addQ.run(comp2, q[0], q[1], q[2], q[3], q[4], q[5], i); }
-
-  /* ---------- Competition 3: ENDED ---------- */
-  const comp3 = (await addComp.run(
-    'C-Core Challenge',
-    'The classics: pointers, arrays, memory and loops from the C programming world, finished with a string manipulation task.',
-    iso(-4 * DAY), iso(-3 * DAY), 25, adminId, iso(-6 * DAY)
-  )).lastInsertRowid;
-
-  const q3 = [
-    ['mcq', 'In C, what does `int *p` declare?', JSON.stringify(['An integer named p', 'A pointer to int named p', 'An array of ints', 'A function returning int']), 'A pointer to int named p', null, 10],
-    ['mcq', 'Which of these is NOT a valid C data type?', JSON.stringify(['int', 'float', 'string', 'char']), 'string', null, 10],
-    ['mcq', 'What is the index of the FIRST element of an array in C?', JSON.stringify(['0', '1', '-1', 'It depends on the compiler']), '0', null, 10],
-    ['output', 'Print the REVERSE of the string stored in `str` below (without a trailing newline concern — just print it).', null, 'olleh',
-      'const str = "hello";\n// print the reversed string\nconsole.log();\n', 20],
-  ];
-  for (let i = 0; i < q3.length; i++) { const q = q3[i]; await addQ.run(comp3, q[0], q[1], q[2], q[3], q[4], q[5], i); }
-
-  /* ---------- Seed attempts so rankings feel alive ---------- */
-  const reg = db.prepare('INSERT INTO registrations (competition_id, user_id, created_at) VALUES (?, ?, ?)');
-  const att = db.prepare(`
-    INSERT INTO attempts (competition_id, user_id, started_at, submitted_at, status, score, correct_count, total_questions, duration_seconds)
-    VALUES (?, ?, ?, ?, 'submitted', ?, ?, ?, ?)
-  `);
-  const ans = db.prepare('INSERT INTO attempt_answers (attempt_id, question_id, answer_text, is_correct) VALUES (?, ?, ?, ?)');
-
-  async function seedAttempt(compId, qTypesAnswers, email, pattern, seconds) {
-    const uid = studentIds[email];
-    await reg.run(compId, uid, iso(-5 * DAY));
-    const questions = await db.prepare('SELECT id, type FROM questions WHERE competition_id = ? ORDER BY sort_order').all(compId);
-    let score = 0, correct = 0;
-    const start = iso(-(3 * DAY));
-    const attemptId = (await att.run(compId, uid, start, iso(-(3 * DAY) + seconds * 1000), 0, 0, questions.length, seconds)).lastInsertRowid;
-    for (let i = 0; i < questions.length; i++) {
-      const qq = questions[i];
-      const ok = pattern[i] ? 1 : 0;
-      if (ok) { correct++; score += qTypesAnswers[i].points; }
-      await ans.run(attemptId, qq.id, ok ? '(demo answer — correct)' : '(demo answer — incorrect)', ok);
+    if (existing.rows.length === 0) {
+      console.log('Performing clean launch purge of all dummy students and competitions...');
+      await purgeAllDummyData();
+      await client.execute({
+        sql: 'INSERT INTO system_migrations (name, applied_at) VALUES (?, ?)',
+        args: ['clean_launch_dummy_data_v1', new Date().toISOString()]
+      });
+      console.log('Clean launch purge complete.');
     }
-    await db.prepare('UPDATE attempts SET score = ?, correct_count = ? WHERE id = ?').run(score, correct, attemptId);
+  } catch (err) {
+    console.error('Error during launch cleanup:', err);
   }
-
-  const q1Rows = await db.prepare('SELECT points FROM questions WHERE competition_id = ? ORDER BY sort_order').all(comp1);
-  const q3Rows = await db.prepare('SELECT points FROM questions WHERE competition_id = ? ORDER BY sort_order').all(comp3);
-
-  // Live competition: 4 of 6 students already attempted
-  await seedAttempt(comp1, q1Rows, 'aarav@student.campus.edu', [1, 1, 1, 0, 1, 0], 1120);
-  await seedAttempt(comp1, q1Rows, 'priya@student.campus.edu',  [1, 1, 1, 1, 1, 1], 890);
-  await seedAttempt(comp1, q1Rows, 'rohan@student.campus.edu',  [1, 0, 1, 1, 0, 1], 1340);
-  await seedAttempt(comp1, q1Rows, 'kabir@student.campus.edu',  [0, 1, 1, 1, 1, 0], 1010);
-
-  // Ended competition: everyone attempted
-  await seedAttempt(comp3, q3Rows, 'aarav@student.campus.edu', [1, 1, 1, 1], 620);
-  await seedAttempt(comp3, q3Rows, 'priya@student.campus.edu',  [1, 0, 1, 1], 700);
-  await seedAttempt(comp3, q3Rows, 'rohan@student.campus.edu',  [0, 1, 1, 0], 940);
-  await seedAttempt(comp3, q3Rows, 'sneha@student.campus.edu',  [1, 1, 0, 1], 810);
-  await seedAttempt(comp3, q3Rows, 'kabir@student.campus.edu',  [1, 1, 1, 0], 555);
-  await seedAttempt(comp3, q3Rows, 'ananya@student.campus.edu', [0, 1, 1, 1], 1005);
-
-  console.log('Seeded database with admin, demo students and sample competitions.');
 }
 
 /* ------------------------------------------------------------------ */
@@ -327,6 +257,7 @@ async function init() {
             await client.execute('ALTER TABLE questions ADD COLUMN test_cases_json TEXT');
           } catch {}
         }
+        await runLaunchCleanup();
         isDbReady = true;
         return;
       } catch {
@@ -345,6 +276,7 @@ async function init() {
         await client.execute('ALTER TABLE questions ADD COLUMN test_cases_json TEXT');
       } catch {}
       await seed();
+      await runLaunchCleanup();
       isDbReady = true;
     } catch (e) {
       initPromise = null; // allow retry on transient failure
@@ -372,4 +304,4 @@ function isProfileComplete(user) {
   );
 }
 
-module.exports = { db, init, hashPassword, verifyPassword, competitionStatus, isProfileComplete };
+module.exports = { db, init, hashPassword, verifyPassword, competitionStatus, isProfileComplete, purgeAllDummyData };
