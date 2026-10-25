@@ -214,7 +214,7 @@ async function runLaunchCleanup() {
 
     const existing = await client.execute({
       sql: 'SELECT name FROM system_migrations WHERE name = ?',
-      args: ['clean_launch_dummy_data_v1']
+      args: ['clean_launch_dummy_data_v2']
     });
 
     if (existing.rows.length === 0) {
@@ -222,7 +222,7 @@ async function runLaunchCleanup() {
       await purgeAllDummyData();
       await client.execute({
         sql: 'INSERT INTO system_migrations (name, applied_at) VALUES (?, ?)',
-        args: ['clean_launch_dummy_data_v1', new Date().toISOString()]
+        args: ['clean_launch_dummy_data_v2', new Date().toISOString()]
       });
       console.log('Clean launch purge complete.');
     }
