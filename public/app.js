@@ -79,7 +79,14 @@ function securityNotice(msg) {
 
 const fmtDate = (d) => new Date(d).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fmtDateFull = (d) => new Date(d).toLocaleString([], { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-const fmtSecs = (s) => `${Math.floor(s / 60)}m ${s % 60}s`;
+const fmtSecs = (s) => {
+  if (s == null || isNaN(s)) return '—';
+  const sec = Math.max(0, Math.round(s));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const rem = sec % 60;
+  return h > 0 ? `${h}h ${m}m ${rem}s` : `${m}m ${rem}s`;
+};
 const initials = (name) => String(name || '?').split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 const medal = (r) => (r === 1 ? '🥇' : r === 2 ? '🥈' : r === 3 ? '🥉' : `#${r}`);
 
@@ -1133,6 +1140,7 @@ function viewOverall() {
         <td class="faint">${esc(r.school_name || '')}<br/><span class="faint">${esc(r.program_name || '')} · Sec ${esc(r.section || '-')} · Batch ${esc(r.batch_year || '-')}</span></td>
         <td>${r.competitions_attempted}</td>
         <td class="faint">${r.avg_accuracy ?? '—'}%</td>
+        <td class="mono faint">${fmtSecs(r.total_duration)}</td>
         <td class="score-cell">${r.total_score}</td>
       </tr>`).join('');
     $('#app').innerHTML = `
@@ -1144,7 +1152,7 @@ function viewOverall() {
         ${podiumHtml(leaderboard)}
         ${leaderboard.length ? `
           <div class="table-wrap" style="margin-top:18px"><table class="lb">
-            <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Points</th></tr></thead>
+            <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Time</th><th>Total Points</th></tr></thead>
             <tbody>${rows}</tbody></table></div>`
           : '<div class="card empty-state"><div class="es-ico">📭</div>Rankings appear once students start competing.</div>'}
       </div>`;

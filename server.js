@@ -512,11 +512,13 @@ async function overallLeaderboard() {
            SUM(a.correct_count) AS total_correct,
            SUM(a.total_questions) AS total_questions,
            COUNT(a.id) AS competitions_attempted,
-           ROUND(AVG(100.0 * a.correct_count / NULLIF(a.total_questions, 0)), 1) AS avg_accuracy
+           ROUND(AVG(100.0 * a.correct_count / NULLIF(a.total_questions, 0)), 1) AS avg_accuracy,
+           COALESCE(SUM(a.duration_seconds), 0) AS total_duration,
+           MAX(a.submitted_at) AS latest_submission
     FROM attempts a JOIN users u ON u.id = a.user_id
     WHERE a.status = 'submitted' AND u.role = 'student'
     GROUP BY u.id
-    ORDER BY total_score DESC, avg_accuracy DESC
+    ORDER BY total_score DESC, avg_accuracy DESC, total_duration ASC, latest_submission ASC
   `).all();
   return rows.map((r, i) => ({ rank: i + 1, ...r }));
 }
