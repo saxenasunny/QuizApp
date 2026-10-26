@@ -299,6 +299,13 @@ tr.me-row { background: rgba(139, 92, 246, 0.11) !important; outline: 1px solid 
 .q-dot.current { outline: 2px solid var(--violet); color: var(--text); }
 .q-body { animation: fadeIn 0.25s ease; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.q-body, .q-prompt, .tc-panel, .tc-code, .tc-view, .code-area {
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+  user-select: none !important;
+}
 .q-prompt { font-size: 17px; line-height: 1.65; margin: 10px 0 20px; white-space: pre-wrap; }
 .option {
   display: flex; gap: 13px; align-items: flex-start; padding: 14px 16px; border-radius: 13px; cursor: pointer;
@@ -317,7 +324,9 @@ tr.me-row { background: rgba(139, 92, 246, 0.11) !important; outline: 1px solid 
   width: 100%; min-height: 380px; height: 380px; border-radius: 13px; padding: 16px 18px;
   font-family: var(--mono); font-size: 13.8px; line-height: 1.75; tab-size: 2;
   background: #05070f; border: 1px solid var(--border-strong); color: #d7e1f5; outline: none; resize: vertical;
-  -webkit-touch-callout: none;
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }
 .code-editor:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.14); }
 .console-out {

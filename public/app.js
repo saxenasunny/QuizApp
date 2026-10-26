@@ -77,6 +77,58 @@ function securityNotice(msg) {
   }
 }
 
+let lastCodeValue = '';
+let allowCodeExpansion = false;
+
+function isQuizPracticalActive() {
+  if (!quizState || !quizState.questions) return false;
+  const q = quizState.questions[quizState.idx];
+  return q && q.type === 'output';
+}
+
+function handleCodeBeforeInput(e, qid) {
+  const t = e.inputType || '';
+  if (
+    t.includes('Paste') ||
+    t.includes('paste') ||
+    t.includes('Drop') ||
+    t === 'insertFromYank' ||
+    t === 'insertReplacementText'
+  ) {
+    if (e.cancelable) e.preventDefault();
+    securityNotice('Pasting from clipboard is disabled. Please type your code.');
+    return false;
+  }
+  // Mobile virtual keyboards (Gboard/Samsung/Apple) often inject clipboard manager snippets as 'insertText' with multiple characters
+  if (t === 'insertText' && e.data && e.data.length > 2) {
+    if (e.cancelable) e.preventDefault();
+    securityNotice('Pasting from clipboard is disabled. Please type your code.');
+    return false;
+  }
+}
+
+function handleCodeInput(qid) {
+  const ed = $('#code-editor');
+  if (!ed) return;
+  if (allowCodeExpansion) {
+    lastCodeValue = ed.value;
+    saveCode(qid);
+    return;
+  }
+  const current = ed.value;
+  const delta = current.length - lastCodeValue.length;
+  // A human typing on phone/desktop adds 1 or at most 2 characters per keystroke.
+  // Any bulk insertion (clipboard dump, autofill) adds > 2 characters in a single event.
+  if (delta > 2) {
+    ed.value = lastCodeValue;
+    if (quizState) quizState.answers[qid] = lastCodeValue;
+    securityNotice('Pasting from clipboard is disabled. Please write your code manually.');
+    return;
+  }
+  lastCodeValue = current;
+  saveCode(qid);
+}
+
 const fmtDate = (d) => new Date(d).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 const fmtDateFull = (d) => new Date(d).toLocaleString([], { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 const fmtSecs = (s) => {
@@ -668,7 +720,8 @@ function renderQuiz() {
           <span class="chip" style="font-size:11.5px;padding:3px 9px;color:var(--muted);border-color:rgba(255,255,255,0.08)"><span style="opacity:0.85">🔒</span> Copy, Paste &amp; Right-click disabled</span>
         </div>
         <textarea class="code-editor" id="code-editor" spellcheck="false"
-          oninput="saveCode(${q.id})"
+          oninput="handleCodeInput(${q.id})"
+          onbeforeinput="return handleCodeBeforeInput(event, ${q.id});"
           onpaste="return false;"
           oncopy="return false;"
           oncut="return false;"
@@ -719,27 +772,47 @@ function renderQuiz() {
   if (q.type !== 'mcq') {
     const ed = $('#code-editor');
     if (ed) {
-      // Prevent context menu (right click)
+      lastCodeValue = ed.value;
+
+      // Prevent context menu (long press / right click)
       ed.addEventListener('contextmenu', (e) => {
         e.preventDefault();
-        securityNotice('Right-click is disabled during the competition.');
+        securityNotice('Right-click / context menu is disabled during the competition.');
       });
 
-      // Prevent paste event (mouse or shortcut)
+      // Prevent paste event (mouse, keyboard, or OS menu)
       ed.addEventListener('paste', (e) => {
         e.preventDefault();
+        if (e.clipboardData) e.clipboardData.clearData();
         securityNotice('Pasting is disabled for practical challenges. Please write your own code.');
       });
 
-      // Prevent copy event
+      // Prevent beforeinput paste on modern mobile browsers (virtual keyboard clipboard manager)
+      ed.addEventListener('beforeinput', (e) => handleCodeBeforeInput(e, q.id));
+
+      // Prevent copy event (mouse, shortcut, or mobile floating bar)
       ed.addEventListener('copy', (e) => {
         e.preventDefault();
-        securityNotice('Copying code is disabled for this challenge.');
+        if (e.clipboardData) {
+          e.clipboardData.clearData();
+          e.clipboardData.setData('text/plain', '');
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText('').catch(() => {});
+        }
+        securityNotice('Copying code to clipboard is disabled.');
       });
 
       // Prevent cut event
       ed.addEventListener('cut', (e) => {
         e.preventDefault();
+        if (e.clipboardData) {
+          e.clipboardData.clearData();
+          e.clipboardData.setData('text/plain', '');
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText('').catch(() => {});
+        }
         securityNotice('Cut is disabled for this challenge.');
       });
 
@@ -751,6 +824,19 @@ function renderQuiz() {
       ed.addEventListener('dragover', (e) => {
         e.preventDefault();
       });
+
+      // Suppress mobile long-press selection menu
+      let touchTimer = null;
+      ed.addEventListener('touchstart', () => {
+        touchTimer = setTimeout(() => {
+          if (window.getSelection) {
+            const sel = window.getSelection();
+            if (sel && sel.removeAllRanges) sel.removeAllRanges();
+          }
+        }, 300);
+      }, { passive: true });
+      ed.addEventListener('touchend', () => clearTimeout(touchTimer), { passive: true });
+      ed.addEventListener('touchmove', () => clearTimeout(touchTimer), { passive: true });
 
       // Intercept keyboard shortcuts (Ctrl+V, Ctrl+C, Ctrl+X, Cmd+V, Cmd+C, Cmd+X, Shift+Insert, Ctrl+Insert)
       // and support Tab key indentation
@@ -779,9 +865,12 @@ function renderQuiz() {
           e.preventDefault();
           const start = ed.selectionStart;
           const end = ed.selectionEnd;
+          allowCodeExpansion = true;
           ed.value = ed.value.substring(0, start) + '    ' + ed.value.substring(end);
           ed.selectionStart = ed.selectionEnd = start + 4;
+          lastCodeValue = ed.value;
           saveCode(q.id);
+          allowCodeExpansion = false;
         }
       });
     }
@@ -2093,6 +2182,43 @@ if (!location.hash || location.hash === '#/') {
   location.hash = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';
 }
 window.addEventListener('hashchange', router);
+
+// Global capture-phase anti-cheat listeners: intercept copy/cut/paste across entire browser window
+window.addEventListener('copy', (e) => {
+  if (isQuizPracticalActive()) {
+    e.preventDefault();
+    if (e.clipboardData) {
+      e.clipboardData.clearData();
+      e.clipboardData.setData('text/plain', '');
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText('').catch(() => {});
+    }
+    securityNotice('Copying is disabled during the competition.');
+  }
+}, true);
+
+window.addEventListener('cut', (e) => {
+  if (isQuizPracticalActive()) {
+    e.preventDefault();
+    if (e.clipboardData) {
+      e.clipboardData.clearData();
+      e.clipboardData.setData('text/plain', '');
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText('').catch(() => {});
+    }
+    securityNotice('Cut is disabled during the competition.');
+  }
+}, true);
+
+window.addEventListener('paste', (e) => {
+  if (isQuizPracticalActive()) {
+    e.preventDefault();
+    if (e.clipboardData) e.clipboardData.clearData();
+    securityNotice('Pasting from clipboard is disabled.');
+  }
+}, true);
 const cy = $('#copyright-year');
 if (cy) cy.textContent = new Date().getFullYear();
 router();
