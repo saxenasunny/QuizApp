@@ -621,6 +621,25 @@ app.post('/api/competitions/:id/register', requireAuth, requireProfile, async (r
   res.json({ ok: true });
 });
 
+/* Deterministic pseudo-random shuffle per participant attempt (consistent on refresh) */
+function shuffleWithSeed(array, seed) {
+  if (!Array.isArray(array) || array.length <= 1) return array ? [...array] : [];
+  const arr = [...array];
+  let s = Math.abs(Number(seed) || 1);
+  if (s === 0) s = 123456789;
+  function random() {
+    s = (s + 0x6D2B79F5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 /* Start (or resume) an attempt. Returns questions WITHOUT answers. */
 app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req, res) => {
   const comp = await db.prepare('SELECT * FROM competitions WHERE id = ?').get(req.params.id);
@@ -637,8 +656,8 @@ app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req,
   const reg = await db.prepare('SELECT id FROM registrations WHERE competition_id = ? AND user_id = ?').get(comp.id, req.user.id);
   if (!reg) return res.status(403).json({ error: 'Register for this competition first.', code: 'NOT_REGISTERED' });
 
-  const questions = await db.prepare('SELECT * FROM questions WHERE competition_id = ? ORDER BY sort_order, id').all(comp.id);
-  if (questions.length === 0) return res.status(400).json({ error: 'This competition has no questions yet.' });
+  const rawQuestions = await db.prepare('SELECT * FROM questions WHERE competition_id = ? ORDER BY sort_order, id').all(comp.id);
+  if (rawQuestions.length === 0) return res.status(400).json({ error: 'This competition has no questions yet.' });
 
   let attempt = await db.prepare('SELECT * FROM attempts WHERE competition_id = ? AND user_id = ?').get(comp.id, req.user.id);
   if (attempt && attempt.status === 'submitted') {
@@ -648,9 +667,12 @@ app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req,
     const r = await db.prepare(`
       INSERT INTO attempts (competition_id, user_id, started_at, status, total_questions)
       VALUES (?, ?, ?, 'in_progress', ?)
-    `).run(comp.id, req.user.id, new Date().toISOString(), questions.length);
+    `).run(comp.id, req.user.id, new Date().toISOString(), rawQuestions.length);
     attempt = await db.prepare('SELECT * FROM attempts WHERE id = ?').get(r.lastInsertRowid);
   }
+
+  // Shuffle questions uniquely for each participant attempt so no two participants see the same question at the same time
+  const questions = shuffleWithSeed(rawQuestions, attempt.id);
 
   // Auto-submit if the window (duration) has elapsed
   const deadline = Math.min(
@@ -786,7 +808,8 @@ app.get('/api/attempts/:id/result', requireAuth, async (req, res) => {
     FROM attempt_answers aa JOIN questions q ON q.id = aa.question_id
     WHERE aa.attempt_id = ? ORDER BY q.sort_order, q.id
   `).all(attempt.id);
-  const details = detailRows.map((d) => ({
+  const shuffledDetails = shuffleWithSeed(detailRows, attempt.id);
+  const details = shuffledDetails.map((d) => ({
     ...d,
     correct: Boolean(d.is_correct),
     test_cases: parseTestCases(d).map((tc, idx) => ({
