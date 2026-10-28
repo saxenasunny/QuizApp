@@ -413,6 +413,56 @@ a.link:hover { text-decoration: underline; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
   padding: 24px; animation: scaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
+.modal-card.modal-card-lg {
+  max-width: 700px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.academic-school-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.academic-chips-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0;
+}
+.academic-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.28);
+  color: #d8b4fe;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.chip-del-btn {
+  background: none;
+  border: none;
+  color: #f87171;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0.8;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.chip-del-btn:hover {
+  opacity: 1;
+  transform: scale(1.2);
+}
+select.input option {
+  background: #0f172a;
+  color: #f1f5f9;
+}
 @keyframes scaleIn {
   from { opacity: 0; transform: scale(0.95) translateY(10px); }
   to { opacity: 1; transform: scale(1) translateY(0); }

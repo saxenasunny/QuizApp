@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const express = require('express');
 const { execFile } = require('child_process');
 
-const { db, init, hashPassword, verifyPassword, competitionStatus, isProfileComplete, purgeAllDummyData } = require('./db');
+const { db, init, hashPassword, verifyPassword, competitionStatus, isProfileComplete, purgeAllDummyData, getAcademicOptions } = require('./db');
 
 const app = express();
 const PORT = (() => {
@@ -1116,6 +1116,72 @@ app.post('/api/admin/purge-data', requireAuth, requireAdmin, async (req, res) =>
     res.json({ ok: true, message: 'All student accounts, competitions, and attempts have been erased.' });
   } catch (err) {
     res.status(500).json({ error: `Purge failed: ${err.message}` });
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Academic Structures (Schools & Programs)                            */
+/* ------------------------------------------------------------------ */
+app.get('/api/academic-options', async (req, res) => {
+  try {
+    const schools = await getAcademicOptions();
+    res.json({ schools });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/schools', requireAuth, requireAdmin, async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'School name is required.' });
+  try {
+    const existing = await db.prepare('SELECT id FROM schools WHERE LOWER(name) = LOWER(?)').get(name);
+    if (existing) return res.status(400).json({ error: 'A school with this name already exists.' });
+    const countRow = await db.prepare('SELECT COUNT(*) AS c FROM schools').get();
+    const r = await db.prepare('INSERT INTO schools (name, sort_order) VALUES (?, ?)').run(name, countRow?.c || 0);
+    res.json({ ok: true, school: { id: r.lastInsertRowid, name, programs: [] } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/schools/:id', requireAuth, requireAdmin, async (req, res) => {
+  const schoolId = parseInt(req.params.id, 10);
+  try {
+    await db.prepare('DELETE FROM programs WHERE school_id = ?').run(schoolId);
+    await db.prepare('DELETE FROM schools WHERE id = ?').run(schoolId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/programs', requireAuth, requireAdmin, async (req, res) => {
+  const schoolId = parseInt(req.body?.school_id, 10);
+  const name = String(req.body?.name || '').trim();
+  if (!schoolId) return res.status(400).json({ error: 'Valid school_id is required.' });
+  if (!name) return res.status(400).json({ error: 'Program name is required.' });
+  try {
+    const school = await db.prepare('SELECT id FROM schools WHERE id = ?').get(schoolId);
+    if (!school) return res.status(404).json({ error: 'School not found.' });
+    const existing = await db.prepare('SELECT id FROM programs WHERE school_id = ? AND LOWER(name) = LOWER(?)').get(schoolId, name);
+    if (existing) return res.status(400).json({ error: 'This program already exists under this school.' });
+    const countRow = await db.prepare('SELECT COUNT(*) AS c FROM programs WHERE school_id = ?').get(schoolId);
+    const r = await db.prepare('INSERT INTO programs (school_id, name, sort_order) VALUES (?, ?, ?)')
+      .run(schoolId, name, countRow?.c || 0);
+    res.json({ ok: true, program: { id: r.lastInsertRowid, school_id: schoolId, name } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/programs/:id', requireAuth, requireAdmin, async (req, res) => {
+  const programId = parseInt(req.params.id, 10);
+  try {
+    await db.prepare('DELETE FROM programs WHERE id = ?').run(programId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

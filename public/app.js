@@ -301,8 +301,86 @@ function viewLogin() {
   });
 }
 
-function viewRegister() {
+let cachedAcademicSchools = null;
+
+async function getAcademicOptions(bust = false) {
+  if (cachedAcademicSchools && !bust) return cachedAcademicSchools;
+  try {
+    const res = await api('/api/academic-options', { bustCache: bust });
+    cachedAcademicSchools = res.schools || [];
+    return cachedAcademicSchools;
+  } catch {
+    return cachedAcademicSchools || [];
+  }
+}
+
+function renderSchoolSelect(schools, selectedSchool, id = 'reg-school', name = 'school_name') {
+  let hasSelected = false;
+  const options = schools.map((s) => {
+    if (selectedSchool === s.name) hasSelected = true;
+    return `<option value="${esc(s.name)}" ${selectedSchool === s.name ? 'selected' : ''}>${esc(s.name)}</option>`;
+  }).join('');
+  const extraOpt = (selectedSchool && !hasSelected)
+    ? `<option value="${esc(selectedSchool)}" selected>${esc(selectedSchool)} (Current)</option>`
+    : '';
+  return `
+    <div class="field">
+      <label>School / Faculty Name <span class="req">*</span></label>
+      <select class="input" id="${id}" name="${name}" required onchange="onSchoolSelectChange(this.value, '${id.startsWith('profile') ? 'profile-program' : 'reg-program'}')">
+        <option value="">-- Select School / Faculty --</option>
+        ${extraOpt}
+        ${options}
+      </select>
+    </div>
+  `;
+}
+
+function renderProgramSelect(schools, selectedSchool, selectedProgram, id = 'reg-program', name = 'program_name') {
+  const school = schools.find((s) => s.name === selectedSchool);
+  const progs = school && school.programs ? school.programs : [];
+  let hasSelected = false;
+  const options = progs.map((p) => {
+    if (selectedProgram === p.name) hasSelected = true;
+    return `<option value="${esc(p.name)}" ${selectedProgram === p.name ? 'selected' : ''}>${esc(p.name)}</option>`;
+  }).join('');
+  const extraOpt = (selectedProgram && !hasSelected)
+    ? `<option value="${esc(selectedProgram)}" selected>${esc(selectedProgram)} (Current)</option>`
+    : '';
+  const isDisabled = !selectedSchool && !selectedProgram;
+  return `
+    <div class="field">
+      <label>Program Name <span class="req">*</span></label>
+      <select class="input" id="${id}" name="${name}" required ${isDisabled ? 'disabled' : ''}>
+        <option value="">${isDisabled ? '-- Select School First --' : '-- Select Program --'}</option>
+        ${extraOpt}
+        ${options}
+      </select>
+    </div>
+  `;
+}
+
+function onSchoolSelectChange(schoolName, targetProgramSelectId) {
+  const sel = $(`#${targetProgramSelectId}`);
+  if (!sel) return;
+  const schools = cachedAcademicSchools || [];
+  const school = schools.find((s) => s.name === schoolName);
+  const progs = school && school.programs ? school.programs : [];
+  if (!schoolName || progs.length === 0) {
+    sel.innerHTML = '<option value="">-- Select School First --</option>';
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  sel.innerHTML = '<option value="">-- Select Program --</option>' +
+    progs.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+}
+
+async function viewRegister() {
   renderNav();
+  if (!cachedAcademicSchools) {
+    $('#app').innerHTML = '<div class="spinner"></div>';
+  }
+  const schools = await getAcademicOptions();
   const f = (name, label, type = 'text', req = true, placeholder = '') => `
     <div class="field">
       <label>${label}${req ? ' <span class="req">*</span>' : ''}</label>
@@ -321,9 +399,9 @@ function viewRegister() {
             <input class="input" type="password" name="password" minlength="6" placeholder="Minimum 6 characters" required />
           </div>
           <div class="form-row">${f('enrollment_no', 'Enrollment No.')}${f('admission_no', 'Admission No.')}</div>
-          ${f('school_name', 'School / Faculty Name', 'text', true, 'e.g. School of Computer Science')}
+          ${renderSchoolSelect(schools, '', 'reg-school')}
           <div class="form-row">
-            ${f('program_name', 'Program Name', 'text', true, 'e.g. B.Tech CSE')}
+            ${renderProgramSelect(schools, '', '', 'reg-program')}
             <div class="form-row">
               ${f('section', 'Section', 'text', true, 'A')}
               ${f('batch_year', 'Batch Year', 'text', true, '2024')}
@@ -337,6 +415,10 @@ function viewRegister() {
   $('#reg-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target).entries());
+    if (!fd.school_name || !fd.program_name) {
+      toast('Please select your School and Program from the dropdowns.', 'error');
+      return;
+    }
     try {
       const { user } = await api('/api/auth/register', { method: 'POST', body: fd });
       ME = user;
@@ -1251,7 +1333,7 @@ function viewOverall() {
 /* ============================================================
    PROFILE
    ============================================================ */
-function viewProfile() {
+async function viewProfile() {
   renderNav('#/profile');
   if (ME.role === 'admin') {
     $('#app').innerHTML = `
@@ -1291,6 +1373,7 @@ function viewProfile() {
     });
     return;
   }
+  const schools = await getAcademicOptions();
   const f = (name, label, val, ph = '') => `
     <div class="field"><label>${label}</label>
     <input class="input" name="${name}" value="${esc(val || '')}" placeholder="${ph}" /></div>`;
@@ -1305,8 +1388,8 @@ function viewProfile() {
         <form id="profile-form">
           ${f('name', 'Full Name <span class="req">*</span>', ME.name)}
           <div class="form-row">${f('enrollment_no', 'Enrollment No. <span class="req">*</span>', ME.enrollment_no, 'e.g. ENR2023001')}${f('admission_no', 'Admission No. <span class="req">*</span>', ME.admission_no, 'e.g. ADM1001')}</div>
-          ${f('school_name', 'School / Faculty Name <span class="req">*</span>', ME.school_name, 'e.g. School of Computer Science')}
-          <div class="form-row">${f('program_name', 'Program Name <span class="req">*</span>', ME.program_name, 'e.g. B.Tech CSE')}
+          ${renderSchoolSelect(schools, ME.school_name || '', 'profile-school')}
+          <div class="form-row">${renderProgramSelect(schools, ME.school_name || '', ME.program_name || '', 'profile-program')}
           <div class="form-row">${f('section', 'Section <span class="req">*</span>', ME.section, 'A')}${f('batch_year', 'Batch Year <span class="req">*</span>', ME.batch_year, '2024')}</div></div>
           <hr class="divider"/>
           <h3>🔒 Change password <span class="faint">(leave blank to keep current)</span></h3>
@@ -1318,6 +1401,10 @@ function viewProfile() {
   $('#profile-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target).entries());
+    if (!fd.school_name || !fd.program_name) {
+      toast('Please select your School and Program from the dropdowns.', 'error');
+      return;
+    }
     try {
       const { user } = await api('/api/profile', { method: 'PUT', body: fd });
       ME = user;
@@ -1357,6 +1444,7 @@ function viewAdmin() {
           <div><h1>🛠️ Admin Panel</h1><p class="muted">Create coding competitions and monitor every ranking.</p></div>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <button class="btn btn-ghost" onclick="downloadQuestionTemplate()">📥 Bulk Template</button>
+            <button class="btn btn-ghost" onclick="openAcademicConfigModal()">🏛️ Schools & Programs</button>
             <button class="btn btn-ghost" onclick="openAdminPasswordModal()">🔑 Change Password</button>
             <button class="btn btn-ghost" style="border-color:rgba(248,113,113,0.35);color:var(--red)" onclick="confirmPurgeData()">🗑️ Reset All Data</button>
             <button class="btn btn-primary" onclick="location.hash='#/admin/new'">＋ Create Competition</button>
@@ -1556,6 +1644,127 @@ function openStudentPasswordModal(studentId, studentName, studentEmail) {
       toast(err.message, 'error');
     }
   });
+}
+
+/* ---------- academic structure (schools & programs) modal ---------- */
+async function openAcademicConfigModal() {
+  const root = $('#modal-root');
+  if (!root) return;
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal-card modal-card-lg">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div>
+            <h2 style="margin:0;font-size:20px">🏛️ Schools & Programs Management</h2>
+            <p class="muted" style="font-size:13px;margin:2px 0 0">Configure official schools and programs selectable by students during registration.</p>
+          </div>
+          <button class="btn btn-ghost btn-sm" type="button" onclick="closeModal()" style="padding:4px 8px">✕</button>
+        </div>
+
+        <div class="card" style="background:rgba(255,255,255,0.02);border:1px dashed var(--border);padding:14px;margin-bottom:18px">
+          <form id="admin-add-school-form" onsubmit="adminAddSchool(event)" style="display:flex;gap:10px;align-items:center">
+            <input class="input" id="new-school-name" placeholder="Enter new School Name (e.g. School of Law)" required style="flex:1" />
+            <button class="btn btn-primary" type="submit" style="white-space:nowrap">＋ Add School</button>
+          </form>
+        </div>
+
+        <div id="academic-modal-list">
+          <div class="spinner"></div>
+        </div>
+      </div>
+    </div>`;
+
+  await refreshAcademicModalList();
+}
+
+async function refreshAcademicModalList() {
+  const container = $('#academic-modal-list');
+  if (!container) return;
+  const schools = await getAcademicOptions(true);
+  if (!schools || schools.length === 0) {
+    container.innerHTML = `<div class="card empty-state" style="padding:24px"><div class="es-ico">🏛️</div>No schools configured yet. Add your first school above.</div>`;
+    return;
+  }
+  container.innerHTML = schools.map((s) => `
+    <div class="academic-school-card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+        <div>
+          <b style="font-size:15px;color:var(--text)">${esc(s.name)}</b>
+          <span class="chip" style="margin-left:8px;font-size:11px">${s.programs.length} Program${s.programs.length === 1 ? '' : 's'}</span>
+        </div>
+        <button class="btn btn-danger btn-sm" type="button" onclick="adminDeleteSchool(${s.id}, '${esc(s.name).replace(/'/g, "\\'")}')" style="padding:3px 8px;font-size:12px">Delete School</button>
+      </div>
+
+      <div class="academic-chips-wrap">
+        ${s.programs.length > 0 ? s.programs.map((p) => `
+          <span class="academic-chip">
+            <span>${esc(p.name)}</span>
+            <button type="button" class="chip-del-btn" title="Delete ${esc(p.name)}" onclick="adminDeleteProgram(${p.id}, '${esc(p.name).replace(/'/g, "\\'")}')">×</button>
+          </span>
+        `).join('') : '<span class="faint" style="font-size:12.5px;padding:4px 0">No programs under this school yet.</span>'}
+      </div>
+
+      <form onsubmit="adminAddProgram(event, ${s.id})" style="display:flex;gap:8px;margin-top:10px">
+        <input class="input" style="padding:6px 12px;font-size:13px;flex:1" placeholder="Add program (e.g. B.Tech Computer Science)" required />
+        <button class="btn btn-ghost btn-sm" type="submit" style="white-space:nowrap">＋ Add Program</button>
+      </form>
+    </div>
+  `).join('');
+}
+
+async function adminAddSchool(e) {
+  e.preventDefault();
+  const input = $('#new-school-name');
+  if (!input) return;
+  const name = input.value.trim();
+  if (!name) return;
+  try {
+    await api('/api/admin/schools', { method: 'POST', body: { name } });
+    toast(`School "${name}" added! 🏫`, 'success');
+    input.value = '';
+    await refreshAcademicModalList();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function adminDeleteSchool(id, name) {
+  if (!confirm(`Are you sure you want to delete school "${name}"?\nAll associated programs will also be deleted.`)) return;
+  try {
+    await api(`/api/admin/schools/${id}`, { method: 'DELETE' });
+    toast(`School deleted.`, 'success');
+    await refreshAcademicModalList();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function adminAddProgram(e, schoolId) {
+  e.preventDefault();
+  const form = e.target;
+  const input = form.querySelector('input');
+  if (!input) return;
+  const name = input.value.trim();
+  if (!name) return;
+  try {
+    await api('/api/admin/programs', { method: 'POST', body: { school_id: schoolId, name } });
+    toast(`Program "${name}" added! 🎓`, 'success');
+    input.value = '';
+    await refreshAcademicModalList();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function adminDeleteProgram(id, name) {
+  if (!confirm(`Remove program "${name}"?`)) return;
+  try {
+    await api(`/api/admin/programs/${id}`, { method: 'DELETE' });
+    toast('Program removed.', 'success');
+    await refreshAcademicModalList();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
 }
 
 /* ---------- competition builder (create / edit) ---------- */

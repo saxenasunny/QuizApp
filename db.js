@@ -152,6 +152,20 @@ CREATE TABLE IF NOT EXISTS attempt_answers (
   is_correct  INTEGER NOT NULL DEFAULT 0,
   UNIQUE (attempt_id, question_id)
 );
+
+CREATE TABLE IF NOT EXISTS schools (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL UNIQUE,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS programs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  school_id  INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (school_id, name)
+);
 `;
 
 /* ------------------------------------------------------------------ */
@@ -231,6 +245,65 @@ async function runLaunchCleanup() {
   }
 }
 
+async function seedAcademicStructures() {
+  try {
+    const countRow = await db.prepare('SELECT COUNT(*) AS c FROM schools').get();
+    if (countRow && countRow.c > 0) return;
+
+    const DEFAULT_STRUCTURE = [
+      {
+        name: 'School of Computer Science & Engineering',
+        programs: ['B.Tech Computer Science & Engineering', 'B.Tech AI & Data Science', 'BCA', 'MCA', 'M.Tech CSE']
+      },
+      {
+        name: 'School of Information Technology',
+        programs: ['B.Tech Information Technology', 'B.Sc Information Technology', 'M.Sc IT']
+      },
+      {
+        name: 'School of Engineering & Technology',
+        programs: ['B.Tech Electronics & Communication', 'B.Tech Electrical Engineering', 'B.Tech Mechanical Engineering']
+      },
+      {
+        name: 'School of Business & Management',
+        programs: ['BBA', 'MBA', 'B.Com']
+      },
+      {
+        name: 'School of Applied Sciences',
+        programs: ['B.Sc Computer Science', 'M.Sc Computer Science', 'B.Sc Mathematics']
+      }
+    ];
+
+    for (let sIdx = 0; sIdx < DEFAULT_STRUCTURE.length; sIdx++) {
+      const s = DEFAULT_STRUCTURE[sIdx];
+      await db.prepare('INSERT OR IGNORE INTO schools (name, sort_order) VALUES (?, ?)').run(s.name, sIdx);
+      const schoolRow = await db.prepare('SELECT id FROM schools WHERE name = ?').get(s.name);
+      if (schoolRow) {
+        for (let pIdx = 0; pIdx < s.programs.length; pIdx++) {
+          await db.prepare('INSERT OR IGNORE INTO programs (school_id, name, sort_order) VALUES (?, ?, ?)')
+            .run(schoolRow.id, s.programs[pIdx], pIdx);
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Error seeding academic structures:', e);
+  }
+}
+
+async function getAcademicOptions() {
+  const schools = await db.prepare('SELECT * FROM schools ORDER BY sort_order, name').all();
+  const programs = await db.prepare('SELECT * FROM programs ORDER BY sort_order, name').all();
+  const pMap = {};
+  for (const p of programs) {
+    if (!pMap[p.school_id]) pMap[p.school_id] = [];
+    pMap[p.school_id].push({ id: p.id, name: p.name });
+  }
+  return schools.map((s) => ({
+    id: s.id,
+    name: s.name,
+    programs: pMap[s.id] || []
+  }));
+}
+
 /* ------------------------------------------------------------------ */
 /* Init (memoized): create schema + seed once per process              */
 /* ------------------------------------------------------------------ */
@@ -257,6 +330,27 @@ async function init() {
             await client.execute('ALTER TABLE questions ADD COLUMN test_cases_json TEXT');
           } catch {}
         }
+        try {
+          await client.execute('SELECT 1 FROM schools LIMIT 1');
+        } catch {
+          await client.execute(`
+            CREATE TABLE IF NOT EXISTS schools (
+              id         INTEGER PRIMARY KEY AUTOINCREMENT,
+              name       TEXT NOT NULL UNIQUE,
+              sort_order INTEGER NOT NULL DEFAULT 0
+            )
+          `);
+          await client.execute(`
+            CREATE TABLE IF NOT EXISTS programs (
+              id         INTEGER PRIMARY KEY AUTOINCREMENT,
+              school_id  INTEGER NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+              name       TEXT NOT NULL,
+              sort_order INTEGER NOT NULL DEFAULT 0,
+              UNIQUE (school_id, name)
+            )
+          `);
+        }
+        await seedAcademicStructures();
         await runLaunchCleanup();
         isDbReady = true;
         return;
@@ -276,6 +370,7 @@ async function init() {
         await client.execute('ALTER TABLE questions ADD COLUMN test_cases_json TEXT');
       } catch {}
       await seed();
+      await seedAcademicStructures();
       await runLaunchCleanup();
       isDbReady = true;
     } catch (e) {
@@ -304,4 +399,14 @@ function isProfileComplete(user) {
   );
 }
 
-module.exports = { db, init, hashPassword, verifyPassword, competitionStatus, isProfileComplete, purgeAllDummyData };
+module.exports = {
+  db,
+  init,
+  hashPassword,
+  verifyPassword,
+  competitionStatus,
+  isProfileComplete,
+  purgeAllDummyData,
+  getAcademicOptions,
+  seedAcademicStructures
+};
