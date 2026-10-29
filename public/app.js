@@ -539,7 +539,7 @@ function viewDashboard() {
               <p class="muted">${liveCount > 0 ? `🔥 <b>${liveCount} competition${liveCount > 1 ? 's are' : ' is'} LIVE right now</b> — jump in!` : 'No live competitions right now — check back soon.'}</p>
             </div>
             <div class="grid grid-3" style="min-width:330px">
-              <div class="card stat-card"><div class="stat-val">${myOverall ? '#' + myOverall.rank : '—'}</div><div class="stat-label">Overall Rank</div></div>
+              <div class="card stat-card"><div class="stat-val">${myOverall ? '#' + (myOverall.rank || myOverall.batch_rank) : '—'}</div><div class="stat-label">${ME.batch_year ? `Batch ${esc(ME.batch_year)} Rank` : 'Batch Rank'}</div></div>
               <div class="card stat-card"><div class="stat-val">${myOverall ? myOverall.total_score : 0}</div><div class="stat-label">Total Points</div></div>
               <div class="card stat-card"><div class="stat-val">${myOverall ? myOverall.avg_accuracy + '%' : '—'}</div><div class="stat-label">Avg Accuracy</div></div>
             </div>
@@ -1348,10 +1348,14 @@ function viewLeaderboardPicker() {
 
 function podiumHtml(leaderboard) {
   const top = leaderboard.slice(0, 3);
-  if (top.length < 3) return '';
-  const order = [1, 0, 2]; // 2nd, 1st, 3rd
+  if (top.length === 0) return '';
+  let order = [0];
+  if (top.length === 2) order = [1, 0];
+  else if (top.length >= 3) order = [1, 0, 2]; // 2nd, 1st, 3rd
+
   return `<div class="podium">${order.map((i) => {
     const r = top[i];
+    if (!r) return '';
     const pts = r.total_score !== undefined && r.total_score !== null ? r.total_score : (r.score ?? 0);
     return `<div class="p-col p-${r.rank}">
       <div class="p-medal">${medal(r.rank)}</div>
@@ -1396,12 +1400,92 @@ function viewLeaderboard(compId) {
   }).catch((e) => { toast(e.message, 'error'); location.hash = '#/leaderboard'; });
 }
 
+let currentOverallTab = null;
+let cachedOverallData = null;
+
 function viewOverall() {
   renderNav('#/overall');
   if (!apiCache.has('/api/rankings/overall')) {
     $('#app').innerHTML = '<div class="spinner"></div>';
   }
-  api('/api/rankings/overall').then(({ leaderboard, me }) => {
+  api('/api/rankings/overall').then((data) => {
+    cachedOverallData = data;
+    const { batches = [], isAdmin } = data;
+
+    // Set default tab on initial page open
+    if (!currentOverallTab) {
+      if (isAdmin) {
+        currentOverallTab = 'all';
+      } else if (ME && ME.batch_year && batches.includes(ME.batch_year)) {
+        currentOverallTab = ME.batch_year;
+      } else if (batches.length > 0) {
+        currentOverallTab = batches[0];
+      } else {
+        currentOverallTab = ME && ME.batch_year ? ME.batch_year : '';
+      }
+    } else {
+      // Security: if user is not admin, prevent active tab from being 'all'
+      if (currentOverallTab === 'all' && !isAdmin) {
+        currentOverallTab = (ME && ME.batch_year && batches.includes(ME.batch_year))
+          ? ME.batch_year
+          : (batches[0] || (ME && ME.batch_year ? ME.batch_year : ''));
+      }
+    }
+
+    renderOverallPage();
+  }).catch((e) => toast(e.message, 'error'));
+}
+
+function switchOverallTab(tabId) {
+  if (!cachedOverallData) return;
+  // Non-admins cannot switch to the final overall cross-batch tab
+  if (tabId === 'all' && (!ME || ME.role !== 'admin')) return;
+  currentOverallTab = tabId;
+  renderOverallPage();
+}
+
+function renderOverallPage() {
+  if (!cachedOverallData) return;
+  const { leaderboard = [], me, batches = [], isAdmin } = cachedOverallData;
+
+  // Build batch tabs list
+  const tabList = [];
+  const displayBatches = [...batches];
+  if (ME && ME.batch_year && !displayBatches.includes(ME.batch_year)) {
+    displayBatches.push(ME.batch_year);
+    displayBatches.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }
+
+  displayBatches.forEach((b) => {
+    tabList.push({ id: b, label: `🎓 Batch ${b}`, isBatch: true });
+  });
+
+  // Final overall ranking (all batches combined) is strictly visible only to Admin
+  if (isAdmin) {
+    tabList.push({ id: 'all', label: `🌐 All Batches (Final Overall)`, isAll: true });
+  }
+
+  // Fallback if current tab is not in list
+  if (!currentOverallTab || !tabList.some((t) => t.id === currentOverallTab)) {
+    currentOverallTab = tabList[0] ? tabList[0].id : '';
+  }
+
+  const tabsHtml = `
+    <div class="batch-tabs-wrap">
+      ${tabList.map((t) => `
+        <button type="button" class="batch-tab-btn ${t.isAll ? 'admin-tab' : ''} ${currentOverallTab === t.id ? 'active' : ''}"
+          onclick="switchOverallTab('${esc(t.id)}')">
+          ${esc(t.label)}
+          ${t.isAll ? '<span class="chip" style="font-size:10px;padding:1px 6px;margin-left:4px;background:rgba(139,92,246,0.3);color:#e9d5ff">Admin</span>' : ''}
+        </button>
+      `).join('')}
+    </div>
+  `;
+
+  let bodyHtml = '';
+
+  if (currentOverallTab === 'all' && isAdmin) {
+    // Admin Final Overall Ranking across all batches and all competitions
     const rows = leaderboard.map((r) => `
       <tr class="${r.user_id === ME.id ? 'me-row' : ''}">
         <td class="rank-num ${r.rank <= 3 ? 'rank-' + r.rank : ''}">${medal(r.rank)}</td>
@@ -1409,26 +1493,79 @@ function viewOverall() {
           <div><div class="uc-name">${esc(r.name)}${r.user_id === ME.id ? ' <span class="faint">(you)</span>' : ''}</div>
           <div class="uc-sub">${esc(r.email)}</div></div></div></td>
         <td class="faint">${esc(r.enrollment_no || '')}</td>
-        <td class="faint">${esc(r.school_name || '')}<br/><span class="faint">${esc(r.program_name || '')} · Sec ${esc(r.section || '-')} · Batch ${esc(r.batch_year || '-')}</span></td>
+        <td><span class="badge badge-info">🎓 ${esc(r.batch_year || '—')}</span> ${r.section ? `<span class="faint">Sec ${esc(r.section)}</span>` : ''}</td>
+        <td class="faint">${esc(r.school_name || '')}<br/><span class="faint">${esc(r.program_name || '')}</span></td>
         <td>${r.competitions_attempted}</td>
         <td class="faint">${r.avg_accuracy ?? '—'}%</td>
         <td class="mono faint">${fmtSecs(r.total_duration)}</td>
         <td class="score-cell">${r.total_score}</td>
       </tr>`).join('');
-    $('#app').innerHTML = `
-      <div class="page-enter">
-        <div class="section-head" style="margin-top:6px">
-          <div><h1>🌍 Overall Campus Ranking</h1>
-          <p class="muted">Total points earned across all competitions. ${me ? `You are ranked <b style="color:var(--cyan)">${medal(me.rank)}</b> with <b style="color:var(--text)">${me.total_score}</b> points.` : ''}</p></div>
+
+    bodyHtml = `
+      <div class="section-head" style="margin-top:6px">
+        <div>
+          <h1>🌐 Final Overall Ranking</h1>
+          <p class="muted">
+            <span class="badge" style="background:rgba(139,92,246,0.18);color:#d8b4fe;border:1px solid rgba(139,92,246,0.35);margin-right:6px">🔒 Visible only to Admin</span>
+            Combined campus-wide ranking across all batches and all competitions.
+          </p>
         </div>
-        ${podiumHtml(leaderboard)}
-        ${leaderboard.length ? `
-          <div class="table-wrap" style="margin-top:18px"><table class="lb">
-            <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Time</th><th>Total Points</th></tr></thead>
-            <tbody>${rows}</tbody></table></div>`
-          : '<div class="card empty-state"><div class="es-ico">📭</div>Rankings appear once students start competing.</div>'}
-      </div>`;
-  }).catch((e) => toast(e.message, 'error'));
+      </div>
+      ${podiumHtml(leaderboard)}
+      ${leaderboard.length ? `
+        <div class="table-wrap" style="margin-top:18px"><table class="lb">
+          <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>Batch / Section</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Time</th><th>Total Points</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+        : '<div class="card empty-state"><div class="es-ico">📭</div>No submissions yet.</div>'}
+    `;
+  } else {
+    // Specific Batch Tab View
+    const batchYear = currentOverallTab;
+    const batchRows = leaderboard
+      .filter((r) => String(r.batch_year || '').trim() === String(batchYear).trim())
+      .map((r, i) => ({ ...r, rank: i + 1 }));
+
+    const myBatchRow = batchRows.find((r) => r.user_id === ME.id);
+
+    const rows = batchRows.map((r) => `
+      <tr class="${r.user_id === ME.id ? 'me-row' : ''}">
+        <td class="rank-num ${r.rank <= 3 ? 'rank-' + r.rank : ''}">${medal(r.rank)}</td>
+        <td><div class="user-cell"><div class="mini-avatar">${esc(initials(r.name))}</div>
+          <div><div class="uc-name">${esc(r.name)}${r.user_id === ME.id ? ' <span class="faint">(you)</span>' : ''}</div>
+          <div class="uc-sub">${esc(r.email)}</div></div></div></td>
+        <td class="faint">${esc(r.enrollment_no || '')}</td>
+        <td class="faint">${esc(r.school_name || '')}<br/><span class="faint">${esc(r.program_name || '')} · Sec ${esc(r.section || '-')}</span></td>
+        <td>${r.competitions_attempted}</td>
+        <td class="faint">${r.avg_accuracy ?? '—'}%</td>
+        <td class="mono faint">${fmtSecs(r.total_duration)}</td>
+        <td class="score-cell">${r.total_score}</td>
+      </tr>`).join('');
+
+    bodyHtml = `
+      <div class="section-head" style="margin-top:6px">
+        <div>
+          <h1>🏆 Batch ${esc(batchYear)} Overall Ranking</h1>
+          <p class="muted">
+            Top performers in the <b>${esc(batchYear)} Batch</b> across all competitions.
+            ${myBatchRow ? ` You are ranked <b style="color:var(--cyan)">${medal(myBatchRow.rank)}</b> in your batch with <b style="color:var(--text)">${myBatchRow.total_score}</b> points.` : ''}
+          </p>
+        </div>
+      </div>
+      ${podiumHtml(batchRows)}
+      ${batchRows.length ? `
+        <div class="table-wrap" style="margin-top:18px"><table class="lb">
+          <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Time</th><th>Total Points</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+        : `<div class="card empty-state"><div class="es-ico">📭</div>No submissions yet for Batch ${esc(batchYear)}. Competitions are batch-focused — participate to get ranked!</div>`}
+    `;
+  }
+
+  $('#app').innerHTML = `
+    <div class="page-enter">
+      ${tabsHtml}
+      ${bodyHtml}
+    </div>
+  `;
 }
 
 /* ============================================================

@@ -583,3 +583,46 @@ select.input option {
   border: 1px solid rgba(248, 113, 113, 0.35);
   color: #fca5a5;
 }
+
+/* ---------- batch ranking tabs ---------- */
+.batch-tabs-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 4px 2px 14px;
+  margin-bottom: 22px;
+  border-bottom: 1px solid var(--border);
+}
+.batch-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.batch-tab-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--border-strong);
+}
+.batch-tab-btn.active {
+  background: rgba(34, 211, 238, 0.12);
+  border-color: var(--cyan);
+  color: #fff;
+  box-shadow: 0 0 14px rgba(34, 211, 238, 0.18);
+}
+.batch-tab-btn.admin-tab.active {
+  background: rgba(139, 92, 246, 0.15);
+  border-color: var(--purple);
+  color: #fff;
+  box-shadow: 0 0 14px rgba(139, 92, 246, 0.25);
+}

@@ -520,7 +520,18 @@ async function overallLeaderboard() {
     GROUP BY u.id
     ORDER BY total_score DESC, avg_accuracy DESC, total_duration ASC, latest_submission ASC
   `).all();
-  return rows.map((r, i) => ({ rank: i + 1, ...r }));
+
+  const batchCounters = {};
+  return rows.map((r, i) => {
+    const b = (r.batch_year || 'Unassigned').trim();
+    batchCounters[b] = (batchCounters[b] || 0) + 1;
+    return {
+      rank: i + 1,
+      overall_rank: i + 1,
+      batch_rank: batchCounters[b],
+      ...r
+    };
+  });
 }
 
 app.get('/api/competitions', requireAuth, async (req, res) => {
@@ -829,8 +840,43 @@ app.get('/api/attempts/:id/result', requireAuth, async (req, res) => {
 /* ------------------------------------------------------------------ */
 app.get('/api/rankings/overall', requireAuth, async (req, res) => {
   const rows = await overallLeaderboard();
+  const isAdmin = req.user.role === 'admin';
   const me = rows.find((r) => r.user_id === req.user.id) || null;
-  res.json({ leaderboard: rows, me });
+
+  // Collect distinct batches from attempts, registered users, and competitions
+  const batchSet = new Set();
+  rows.forEach((r) => {
+    if (r.batch_year && r.batch_year.trim()) batchSet.add(r.batch_year.trim());
+  });
+  try {
+    const registeredBatches = await db.prepare("SELECT DISTINCT batch_year FROM users WHERE batch_year IS NOT NULL AND TRIM(batch_year) != ''").all();
+    registeredBatches.forEach((b) => {
+      if (b.batch_year && b.batch_year.trim()) batchSet.add(b.batch_year.trim());
+    });
+    const compBatches = await db.prepare("SELECT DISTINCT batch_year FROM competitions WHERE batch_year IS NOT NULL AND TRIM(batch_year) != '' AND LOWER(batch_year) != 'all'").all();
+    compBatches.forEach((b) => {
+      if (b.batch_year && b.batch_year.trim()) batchSet.add(b.batch_year.trim());
+    });
+  } catch {}
+
+  if (req.user.batch_year && req.user.batch_year.trim()) {
+    batchSet.add(req.user.batch_year.trim());
+  }
+
+  const batches = Array.from(batchSet).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+  // For students / participants: final overall ranking (across all batches) is hidden
+  if (!isAdmin) {
+    const studentMe = me ? { ...me, rank: me.batch_rank } : null;
+    const sanitizedRows = rows.map((r) => {
+      const { overall_rank, ...rest } = r;
+      return { ...rest, rank: r.batch_rank };
+    });
+    return res.json({ leaderboard: sanitizedRows, me: studentMe, batches, isAdmin: false });
+  }
+
+  // Admin sees full leaderboard with both overall_rank and batch_rank
+  res.json({ leaderboard: rows, me, batches, isAdmin: true });
 });
 
 app.get('/api/rankings/competition/:id', requireAuth, async (req, res) => {
