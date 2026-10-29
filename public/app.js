@@ -107,6 +107,27 @@ function handleCodeBeforeInput(e, qid) {
   }
 }
 
+function verifyAndSyncCode(qid) {
+  const ed = $('#code-editor');
+  if (!ed || !quizState) return false;
+  if (allowCodeExpansion) {
+    lastCodeValue = ed.value;
+    quizState.answers[qid] = lastCodeValue;
+    return true;
+  }
+  if (ed.value !== lastCodeValue) {
+    // Tampering detected via Inspector / DOM modification
+    console.warn('[Anti-Cheat] External DOM/Inspector tampering detected on code-editor.');
+    ed.value = lastCodeValue;
+    quizState.answers[qid] = lastCodeValue;
+    securityNotice('⚠️ Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
+    return false;
+  }
+  // Ensure quizState answer strictly matches verified lastCodeValue
+  quizState.answers[qid] = lastCodeValue;
+  return true;
+}
+
 function handleCodeInput(qid) {
   const ed = $('#code-editor');
   if (!ed) return;
@@ -118,11 +139,11 @@ function handleCodeInput(qid) {
   const current = ed.value;
   const delta = current.length - lastCodeValue.length;
   // A human typing on phone/desktop adds 1 or at most 2 characters per keystroke.
-  // Any bulk insertion (clipboard dump, autofill) adds > 2 characters in a single event.
+  // Any bulk insertion (clipboard dump, autofill, inspector injection) adds > 2 characters in a single event.
   if (delta > 2) {
     ed.value = lastCodeValue;
     if (quizState) quizState.answers[qid] = lastCodeValue;
-    securityNotice('Pasting from clipboard is disabled. Please write your code manually.');
+    securityNotice('Pasting from clipboard or inspector is disabled. Please write your code manually.');
     return;
   }
   lastCodeValue = current;
@@ -854,7 +875,77 @@ function renderQuiz() {
   if (q.type !== 'mcq') {
     const ed = $('#code-editor');
     if (ed) {
+      allowCodeExpansion = true;
       lastCodeValue = ed.value;
+      if (s && s.answers) s.answers[q.id] = lastCodeValue;
+      allowCodeExpansion = false;
+
+      // Prevent programmatic injection via Console / Inspector (e.g. ed.value = "...")
+      const nativeValueDesc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+      if (nativeValueDesc) {
+        try {
+          Object.defineProperty(ed, 'value', {
+            get() {
+              return nativeValueDesc.get.call(this);
+            },
+            set(val) {
+              const strVal = String(val ?? '');
+              if (allowCodeExpansion || strVal === lastCodeValue) {
+                nativeValueDesc.set.call(this, strVal);
+                return;
+              }
+              const currentVal = nativeValueDesc.get.call(this);
+              const delta = strVal.length - currentVal.length;
+              if (delta > 2) {
+                securityNotice('⚠️ Direct Inspector / Console modification blocked. Please type manually.');
+                nativeValueDesc.set.call(this, lastCodeValue);
+                return;
+              }
+              nativeValueDesc.set.call(this, strVal);
+            },
+            configurable: true
+          });
+        } catch {}
+      }
+
+      // Observe DOM mutations made through Inspector window (e.g. "Edit as HTML", child node edits)
+      if (window._codeEditorObserver) {
+        window._codeEditorObserver.disconnect();
+      }
+      const obs = new MutationObserver(() => {
+        if (allowCodeExpansion) return;
+        const currentEd = $('#code-editor');
+        if (!currentEd) return;
+        if (currentEd.value !== lastCodeValue) {
+          currentEd.value = lastCodeValue;
+          if (quizState) quizState.answers[q.id] = lastCodeValue;
+          securityNotice('⚠️ Inspector DOM manipulation detected and reverted!');
+        }
+      });
+      obs.observe(ed, { childList: true, characterData: true, subtree: true });
+      const codeArea = $('.code-area');
+      if (codeArea) {
+        obs.observe(codeArea, { childList: true });
+      }
+      window._codeEditorObserver = obs;
+
+      // Real-time heartbeat integrity timer to catch any unobserved inspector manipulation
+      if (!window._editorIntegrityInterval) {
+        window._editorIntegrityInterval = setInterval(() => {
+          if (!quizState || !isQuizPracticalActive() || allowCodeExpansion) return;
+          const currentEd = $('#code-editor');
+          if (!currentEd) return;
+          if (currentEd.value !== lastCodeValue) {
+            const delta = currentEd.value.length - lastCodeValue.length;
+            if (delta > 2) {
+              currentEd.value = lastCodeValue;
+              const curQ = quizState.questions ? quizState.questions[quizState.idx] : null;
+              if (curQ) quizState.answers[curQ.id] = lastCodeValue;
+              securityNotice('⚠️ External code insertion detected and reverted. Type your code manually.');
+            }
+          }
+        }, 200);
+      }
 
       // Prevent context menu (long press / right click)
       ed.addEventListener('contextmenu', (e) => {
@@ -985,7 +1076,9 @@ function changeQuizLang(qid, newLang) {
   if (!currentCode || currentCode === DEFAULT_STARTER_CODE[oldLang]) {
     quizState.answers[qid] = DEFAULT_STARTER_CODE[newLang];
   }
+  allowCodeExpansion = true;
   renderQuiz();
+  allowCodeExpansion = false;
 }
 
 function goQ(i) {
@@ -1002,13 +1095,13 @@ function selectOption(qid, optIdx) {
 }
 
 function saveCode(qid) {
-  const ed = $('#code-editor');
-  if (ed) quizState.answers[qid] = ed.value;
+  verifyAndSyncCode(qid);
 }
 
 function saveCurrentCode() {
+  if (!quizState || !quizState.questions) return;
   const q = quizState.questions[quizState.idx];
-  if (q.type === 'output') saveCode(q.id);
+  if (q && q.type === 'output') verifyAndSyncCode(q.id);
 }
 
 function switchTcTab(qid, tabIdx) {
@@ -1019,9 +1112,10 @@ function switchTcTab(qid, tabIdx) {
 }
 
 async function runTestCases(qid) {
+  if (!verifyAndSyncCode(qid)) return;
   saveCurrentCode();
   const btn = $('#test-run-btn');
-  const code = quizState.answers[qid] || '';
+  const code = lastCodeValue || quizState.answers[qid] || '';
   const language = quizState.answers[`${qid}_lang`] || quizState.questions[quizState.idx].language || 'javascript';
   if (!code.trim()) {
     toast('Please write some code first.', 'error');
@@ -1055,10 +1149,11 @@ async function runTestCases(qid) {
 }
 
 async function runCode(qid) {
+  if (!verifyAndSyncCode(qid)) return;
   saveCurrentCode();
   const btn = $('#run-btn');
   const out = $('#console-out');
-  const code = quizState.answers[qid] || '';
+  const code = lastCodeValue || quizState.answers[qid] || '';
   const language = quizState.answers[`${qid}_lang`] || quizState.questions[quizState.idx].language || 'javascript';
 
   // Automatically pass the active test case's input for practical questions
@@ -1102,6 +1197,10 @@ async function runCode(qid) {
 
 async function submitQuiz(auto = false) {
   if (!quizState) return;
+  const curQ = quizState.questions ? quizState.questions[quizState.idx] : null;
+  if (curQ && curQ.type === 'output') {
+    if (!verifyAndSyncCode(curQ.id) && !auto) return;
+  }
   saveCurrentCode();
   const s = quizState;
   const unanswered = s.questions.filter((x) => s.answers[x.id] === undefined || String(s.answers[x.id]).trim() === '').length;
@@ -1115,6 +1214,8 @@ async function submitQuiz(auto = false) {
     const r = await api(`/api/attempts/${s.attempt.id}/submit`, { method: 'POST', body: { answers: s.answers } });
     quizState = null;
     clearInterval(quizTimer);
+    if (window._editorIntegrityInterval) { clearInterval(window._editorIntegrityInterval); window._editorIntegrityInterval = null; }
+    if (window._codeEditorObserver) { window._codeEditorObserver.disconnect(); window._codeEditorObserver = null; }
     toast(`Submitted! You scored ${r.result.score} points.`, 'success');
     location.hash = `#/result/${s.attempt.id}`;
   } catch (e) {
@@ -2361,7 +2462,12 @@ async function viewResultByComp(compId) {
 }
 
 function router() {
-  if (quizTimer && !location.hash.startsWith('#/quiz/')) { clearInterval(quizTimer); quizTimer = null; }
+  if (quizTimer && !location.hash.startsWith('#/quiz/')) {
+    clearInterval(quizTimer);
+    quizTimer = null;
+    if (window._editorIntegrityInterval) { clearInterval(window._editorIntegrityInterval); window._editorIntegrityInterval = null; }
+    if (window._codeEditorObserver) { window._codeEditorObserver.disconnect(); window._codeEditorObserver = null; }
+  }
   const hash = location.hash || '#/login';
   const path = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';
 
@@ -2426,6 +2532,45 @@ window.addEventListener('paste', (e) => {
     e.preventDefault();
     if (e.clipboardData) e.clipboardData.clearData();
     securityNotice('Pasting from clipboard is disabled.');
+  }
+}, true);
+
+// Global context menu (right-click) prevention during quiz to block "Inspect"
+window.addEventListener('contextmenu', (e) => {
+  if (quizState) {
+    e.preventDefault();
+    securityNotice('Right-click / Inspector is disabled during competitions.');
+  }
+}, true);
+
+// Global shortcut blocker to intercept DevTools opening during quiz
+window.addEventListener('keydown', (e) => {
+  if (!quizState) return;
+  const isMod = e.ctrlKey || e.metaKey;
+  const k = e.key ? e.key.toLowerCase() : '';
+
+  // F12 key (DevTools toggle)
+  if (e.key === 'F12' || e.keyCode === 123) {
+    e.preventDefault();
+    e.stopPropagation();
+    securityNotice('Developer Tools (F12) is disabled during competitions.');
+    return;
+  }
+
+  // Ctrl+Shift+I / Cmd+Opt+I (Inspector), Ctrl+Shift+J / Cmd+Opt+J (Console), Ctrl+Shift+C / Cmd+Opt+C (Element Picker)
+  if (isMod && e.shiftKey && (k === 'i' || k === 'j' || k === 'c')) {
+    e.preventDefault();
+    e.stopPropagation();
+    securityNotice('Developer Tools / Inspector shortcuts are disabled.');
+    return;
+  }
+
+  // Ctrl+U / Cmd+Opt+U (View Source)
+  if (isMod && k === 'u') {
+    e.preventDefault();
+    e.stopPropagation();
+    securityNotice('View Source is disabled during competitions.');
+    return;
   }
 }, true);
 const cy = $('#copyright-year');
