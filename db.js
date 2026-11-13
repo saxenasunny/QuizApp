@@ -131,16 +131,20 @@ CREATE TABLE IF NOT EXISTS registrations (
 );
 
 CREATE TABLE IF NOT EXISTS attempts (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  competition_id   INTEGER NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
-  user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  started_at       TEXT NOT NULL,
-  submitted_at     TEXT,
-  status           TEXT NOT NULL DEFAULT 'in_progress',
-  score            INTEGER NOT NULL DEFAULT 0,
-  correct_count    INTEGER NOT NULL DEFAULT 0,
-  total_questions  INTEGER NOT NULL DEFAULT 0,
-  duration_seconds INTEGER NOT NULL DEFAULT 0,
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  competition_id       INTEGER NOT NULL REFERENCES competitions(id) ON DELETE CASCADE,
+  user_id              INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  started_at           TEXT NOT NULL,
+  submitted_at         TEXT,
+  status               TEXT NOT NULL DEFAULT 'in_progress',
+  score                INTEGER NOT NULL DEFAULT 0,
+  correct_count        INTEGER NOT NULL DEFAULT 0,
+  total_questions      INTEGER NOT NULL DEFAULT 0,
+  duration_seconds     INTEGER NOT NULL DEFAULT 0,
+  window_changes_count INTEGER NOT NULL DEFAULT 0,
+  window_resizes_count INTEGER NOT NULL DEFAULT 0,
+  is_flagged           INTEGER NOT NULL DEFAULT 0,
+  flag_reason          TEXT,
   UNIQUE (competition_id, user_id)
 );
 
@@ -331,6 +335,14 @@ async function init() {
           } catch {}
         }
         try {
+          await client.execute('SELECT window_changes_count FROM attempts LIMIT 1');
+        } catch {
+          try { await client.execute('ALTER TABLE attempts ADD COLUMN window_changes_count INTEGER NOT NULL DEFAULT 0'); } catch {}
+          try { await client.execute('ALTER TABLE attempts ADD COLUMN window_resizes_count INTEGER NOT NULL DEFAULT 0'); } catch {}
+          try { await client.execute('ALTER TABLE attempts ADD COLUMN is_flagged INTEGER NOT NULL DEFAULT 0'); } catch {}
+          try { await client.execute('ALTER TABLE attempts ADD COLUMN flag_reason TEXT'); } catch {}
+        }
+        try {
           await client.execute('SELECT 1 FROM schools LIMIT 1');
         } catch {
           await client.execute(`
@@ -368,6 +380,18 @@ async function init() {
       } catch {}
       try {
         await client.execute('ALTER TABLE questions ADD COLUMN test_cases_json TEXT');
+      } catch {}
+      try {
+        await client.execute('ALTER TABLE attempts ADD COLUMN window_changes_count INTEGER NOT NULL DEFAULT 0');
+      } catch {}
+      try {
+        await client.execute('ALTER TABLE attempts ADD COLUMN window_resizes_count INTEGER NOT NULL DEFAULT 0');
+      } catch {}
+      try {
+        await client.execute('ALTER TABLE attempts ADD COLUMN is_flagged INTEGER NOT NULL DEFAULT 0');
+      } catch {}
+      try {
+        await client.execute('ALTER TABLE attempts ADD COLUMN flag_reason TEXT');
       } catch {}
       await seed();
       await seedAcademicStructures();

@@ -519,6 +519,7 @@ function viewDashboard() {
         <tr>
           <td><b>${esc(p.title)}</b></td>
           <td>${statusBadge(p.status)}</td>
+          <td>${p.is_flagged ? `<span class="badge" style="background:rgba(239,68,68,0.18);color:#f87171;border:1px solid rgba(239,68,68,0.4)" title="${esc(p.flag_reason || '')}">🚩 Flagged</span>` : '<span class="badge" style="background:rgba(52,211,153,0.12);color:var(--green)">✔ Clean</span>'}</td>
           <td class="score-cell">${p.score}</td>
           <td>${p.correct_count}/${p.total_questions}</td>
           <td class="rank-num ${p.rank <= 3 ? 'rank-' + p.rank : ''}">${medal(p.rank)} <span class="faint">of ${p.participants}</span></td>
@@ -552,7 +553,7 @@ function viewDashboard() {
           <div class="section-head"><h2>📜 My Participations</h2></div>
           ${parts.participations.length ? `
             <div class="table-wrap"><table class="lb">
-              <thead><tr><th>Competition</th><th>Status</th><th>Score</th><th>Correct</th><th>Your Rank</th><th></th></tr></thead>
+              <thead><tr><th>Competition</th><th>Status</th><th>Integrity</th><th>Score</th><th>Correct</th><th>Your Rank</th><th></th></tr></thead>
               <tbody>${partsRows}</tbody>
             </table></div>` : `
             <div class="card empty-state"><div class="es-ico">🚀</div>You haven't completed any competition yet. Your history will appear here.</div>`}
@@ -667,8 +668,115 @@ function viewCompetition(id) {
 }
 
 /* ============================================================
-   QUIZ PLAYER
+   QUIZ PLAYER & INTEGRITY MONITORING
    ============================================================ */
+let integrityCleanupFn = null;
+let lastWindowChangeTime = 0;
+let lastWindowResizeTime = 0;
+let initialWinW = window.innerWidth;
+let initialWinH = window.innerHeight;
+
+function startQuizIntegrityMonitoring(attemptId) {
+  if (integrityCleanupFn) integrityCleanupFn();
+
+  initialWinW = window.innerWidth;
+  initialWinH = window.innerHeight;
+
+  const onWindowChange = (type) => {
+    if (!quizState || !quizState.attempt) return;
+    const now = Date.now();
+    if (now - lastWindowChangeTime < 750) return; // avoid duplicate blur + visibilitychange firing
+    lastWindowChangeTime = now;
+    quizState.windowChangesCount = (quizState.windowChangesCount || 0) + 1;
+    quizState.isFlagged = true;
+    updateIntegrityUi();
+    securityNotice(`⚠️ Window / tab switch detected! (Count: ${quizState.windowChangesCount}). Your attempt is marked as FLAGGED for evaluation.`);
+    syncIntegrityEvent(attemptId, 'window_change');
+  };
+
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') {
+      onWindowChange('tab_hidden');
+    }
+  };
+
+  const onBlur = () => {
+    onWindowChange('window_blur');
+  };
+
+  const onResize = () => {
+    if (!quizState || !quizState.attempt) return;
+    const now = Date.now();
+    if (now - lastWindowResizeTime < 900) return;
+
+    // Check if on mobile and only height changed while input/textarea is focused (virtual keyboard)
+    const activeEl = document.activeElement;
+    const isInputFocused = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA');
+    const widthDiff = Math.abs(window.innerWidth - initialWinW);
+    const heightDiff = Math.abs(window.innerHeight - initialWinH);
+
+    if (isInputFocused && widthDiff < 20) {
+      // Virtual keyboard toggle, do not penalize
+      return;
+    }
+    if (widthDiff < 30 && heightDiff < 50) return;
+
+    lastWindowResizeTime = now;
+    initialWinW = window.innerWidth;
+    initialWinH = window.innerHeight;
+    quizState.windowResizesCount = (quizState.windowResizesCount || 0) + 1;
+    quizState.isFlagged = true;
+    updateIntegrityUi();
+    securityNotice(`⚠️ Window resize detected! (Count: ${quizState.windowResizesCount}). Your attempt is marked as FLAGGED for evaluation.`);
+    syncIntegrityEvent(attemptId, 'window_resize');
+  };
+
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  window.addEventListener('blur', onBlur);
+  window.addEventListener('resize', onResize);
+
+  integrityCleanupFn = () => {
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.removeEventListener('blur', onBlur);
+    window.removeEventListener('resize', onResize);
+    integrityCleanupFn = null;
+  };
+}
+
+function updateIntegrityUi() {
+  const chip = $('#quiz-integrity-chip');
+  if (chip && quizState) {
+    const flags = (quizState.windowChangesCount || 0) + (quizState.windowResizesCount || 0);
+    if (flags > 0) {
+      chip.style.cssText = 'font-size:11.5px;padding:4px 10px;color:#f87171;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.12)';
+      chip.title = `${quizState.windowChangesCount || 0} window/tab changes, ${quizState.windowResizesCount || 0} resizes recorded`;
+      chip.innerHTML = `🚩 Flagged (${quizState.windowChangesCount || 0}W / ${quizState.windowResizesCount || 0}R)`;
+    }
+  }
+}
+
+async function syncIntegrityEvent(attemptId, type) {
+  if (!quizState || !quizState.attempt) return;
+  try {
+    await api(`/api/attempts/${attemptId}/integrity-event`, {
+      method: 'POST',
+      body: {
+        event_type: type,
+        window_changes_count: quizState.windowChangesCount || 0,
+        window_resizes_count: quizState.windowResizesCount || 0,
+      }
+    });
+  } catch {}
+}
+
+function renderIntegrityIndicator(s) {
+  const flags = (s.windowChangesCount || 0) + (s.windowResizesCount || 0);
+  if (flags > 0) {
+    return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:#f87171;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.12)" title="${s.windowChangesCount || 0} window/tab changes, ${s.windowResizesCount || 0} resizes recorded">🚩 Flagged (${s.windowChangesCount || 0}W / ${s.windowResizesCount || 0}R)</span>`;
+  }
+  return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:var(--green);border-color:rgba(52,211,153,0.35);background:rgba(52,211,153,0.08)" title="Window changes and resizes are actively monitored"><span class="pulse-dot" style="background:var(--green)"></span> 🛡️ Integrity Active</span>`;
+}
+
 function viewQuiz(compId) {
   renderNav('#/dashboard');
   $('#app').innerHTML = '<div class="spinner"></div>';
@@ -683,7 +791,11 @@ function viewQuiz(compId) {
         answers: {},
         testResults: {},
         activeTcTab: {},
+        windowChangesCount: data.attempt.window_changes_count || 0,
+        windowResizesCount: data.attempt.window_resizes_count || 0,
+        isFlagged: Boolean(data.attempt.is_flagged),
       };
+      startQuizIntegrityMonitoring(data.attempt.id);
       renderQuiz();
       if (quizTimer) clearInterval(quizTimer);
       quizTimer = setInterval(() => {
@@ -855,7 +967,10 @@ function renderQuiz() {
         </div>
         <div class="timer" id="quiz-timer">${timeLeftStr(s.attempt.deadline - Date.now())}</div>
         <div class="q-dots">${dots}</div>
-        <button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="submitQuiz(false)">📤 Submit Quiz</button>
+        <div id="quiz-integrity-wrap" style="display:inline-flex;align-items:center;margin-left:auto;gap:10px">
+          ${renderIntegrityIndicator(s)}
+          <button class="btn btn-primary btn-sm" onclick="submitQuiz(false)">📤 Submit Quiz</button>
+        </div>
       </div>
 
       <div class="card q-body">
@@ -1211,7 +1326,15 @@ async function submitQuiz(auto = false) {
     if (!confirm(msg)) return;
   }
   try {
-    const r = await api(`/api/attempts/${s.attempt.id}/submit`, { method: 'POST', body: { answers: s.answers } });
+    const integrityPayload = {
+      window_changes_count: s.windowChangesCount || 0,
+      window_resizes_count: s.windowResizesCount || 0,
+    };
+    const r = await api(`/api/attempts/${s.attempt.id}/submit`, {
+      method: 'POST',
+      body: { answers: s.answers, integrity: integrityPayload }
+    });
+    if (integrityCleanupFn) integrityCleanupFn();
     quizState = null;
     clearInterval(quizTimer);
     if (window._editorIntegrityInterval) { clearInterval(window._editorIntegrityInterval); window._editorIntegrityInterval = null; }
@@ -1276,6 +1399,22 @@ function viewResult(attemptId) {
           </div>
           <div class="verdict grad-text">${verdict}</div>
           <p class="muted" style="margin-top:6px">You finished <b style="color:var(--text)">${medal(rank)}</b> out of <b style="color:var(--text)">${participants}</b> in <span class="mono">${esc(attempt.competition_title)}</span> · Time: <span class="mono">${fmtSecs(attempt.duration_seconds)}</span></p>
+          ${attempt.is_flagged ? `
+            <div class="banner" style="background:rgba(239,68,68,0.12);border:1px solid rgba(239,68,68,0.35);color:#fca5a5;margin:16px auto 0;max-width:540px;text-align:left">
+              <span class="banner-ico" style="font-size:22px">🚩</span>
+              <div class="banner-body">
+                <b style="color:#f87171">Integrity Evaluation: Flagged for Review</b><br/>
+                <span style="font-size:13px">Suspicious window change or resize activity was recorded during this attempt.</span><br/>
+                <span class="faint" style="font-size:12px">Details: ${esc(attempt.flag_reason || 'Window switch or resize recorded')} (${attempt.window_changes_count || 0} window switch${attempt.window_changes_count === 1 ? '' : 'es'}, ${attempt.window_resizes_count || 0} resize${attempt.window_resizes_count === 1 ? '' : 's'})</span>
+              </div>
+            </div>
+          ` : `
+            <div style="margin-top:14px">
+              <span class="chip" style="color:var(--green);border-color:rgba(52,211,153,0.35);background:rgba(52,211,153,0.08);padding:4px 14px;font-size:12.5px">
+                🛡️ Test Integrity: Clean (No window switches or resizes recorded)
+              </span>
+            </div>
+          `}
           <div style="display:flex;gap:12px;justify-content:center;margin-top:18px;flex-wrap:wrap">
             <button class="btn btn-primary" onclick="location.hash='#/leaderboard/${attempt.competition_id}'">🏆 View Leaderboard</button>
             <button class="btn btn-ghost" onclick="location.hash='#/dashboard'">Back to Competitions</button>
@@ -1382,6 +1521,17 @@ function viewLeaderboard(compId) {
         <td class="score-cell">${r.score}</td>
         <td>${r.correct_count}/${r.total_questions}</td>
         <td class="mono faint">${fmtSecs(r.duration_seconds)}</td>
+        <td>
+          ${r.is_flagged ? `
+            <span class="badge" style="background:rgba(239,68,68,0.18);color:#f87171;border:1px solid rgba(239,68,68,0.4);cursor:help" title="${esc(r.flag_reason || 'Window change or resize activity detected')}">
+              🚩 Flagged ${r.window_changes_count || r.window_resizes_count ? `(${r.window_changes_count || 0}W / ${r.window_resizes_count || 0}R)` : ''}
+            </span>
+          ` : `
+            <span class="badge" style="background:rgba(52,211,153,0.12);color:var(--green);border:1px solid rgba(52,211,153,0.3)">
+              ✔ Clean
+            </span>
+          `}
+        </td>
       </tr>`).join('');
     $('#app').innerHTML = `
       <div class="page-enter">
@@ -1393,7 +1543,7 @@ function viewLeaderboard(compId) {
         ${podiumHtml(leaderboard)}
         ${leaderboard.length ? `
           <div class="table-wrap" style="margin-top:18px"><table class="lb">
-            <thead><tr><th>Rank</th><th>Student</th><th>Section / Batch</th><th>Score</th><th>Correct</th><th>Time</th></tr></thead>
+            <thead><tr><th>Rank</th><th>Student</th><th>Section / Batch</th><th>Score</th><th>Correct</th><th>Time</th><th>Integrity</th></tr></thead>
             <tbody>${rows}</tbody></table></div>`
           : '<div class="card empty-state"><div class="es-ico">📭</div>No submissions yet.</div>'}
       </div>`;
@@ -1498,6 +1648,7 @@ function renderOverallPage() {
         <td>${r.competitions_attempted}</td>
         <td class="faint">${r.avg_accuracy ?? '—'}%</td>
         <td class="mono faint">${fmtSecs(r.total_duration)}</td>
+        <td>${r.flagged_attempts_count > 0 ? `<span class="badge" style="background:rgba(239,68,68,0.18);color:#f87171;border:1px solid rgba(239,68,68,0.4)" title="${r.total_window_changes || 0} window switches, ${r.total_window_resizes || 0} resizes across competitions">🚩 ${r.flagged_attempts_count} Flagged</span>` : '<span class="badge" style="background:rgba(52,211,153,0.12);color:var(--green)">✔ Clean</span>'}</td>
         <td class="score-cell">${r.total_score}</td>
       </tr>`).join('');
 
@@ -1514,7 +1665,7 @@ function renderOverallPage() {
       ${podiumHtml(leaderboard)}
       ${leaderboard.length ? `
         <div class="table-wrap" style="margin-top:18px"><table class="lb">
-          <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>Batch / Section</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Time</th><th>Total Points</th></tr></thead>
+          <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>Batch / Section</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Time</th><th>Integrity</th><th>Total Points</th></tr></thead>
           <tbody>${rows}</tbody></table></div>`
         : '<div class="card empty-state"><div class="es-ico">📭</div>No submissions yet.</div>'}
     `;
@@ -1538,6 +1689,7 @@ function renderOverallPage() {
         <td>${r.competitions_attempted}</td>
         <td class="faint">${r.avg_accuracy ?? '—'}%</td>
         <td class="mono faint">${fmtSecs(r.total_duration)}</td>
+        <td>${r.flagged_attempts_count > 0 ? `<span class="badge" style="background:rgba(239,68,68,0.18);color:#f87171;border:1px solid rgba(239,68,68,0.4)" title="${r.total_window_changes || 0} window switches, ${r.total_window_resizes || 0} resizes across competitions">🚩 ${r.flagged_attempts_count} Flagged</span>` : '<span class="badge" style="background:rgba(52,211,153,0.12);color:var(--green)">✔ Clean</span>'}</td>
         <td class="score-cell">${r.total_score}</td>
       </tr>`).join('');
 
@@ -1554,7 +1706,7 @@ function renderOverallPage() {
       ${podiumHtml(batchRows)}
       ${batchRows.length ? `
         <div class="table-wrap" style="margin-top:18px"><table class="lb">
-          <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Time</th><th>Total Points</th></tr></thead>
+          <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Accuracy</th><th>Total Time</th><th>Integrity</th><th>Total Points</th></tr></thead>
           <tbody>${rows}</tbody></table></div>`
         : `<div class="card empty-state"><div class="es-ico">📭</div>No submissions yet for Batch ${esc(batchYear)}. Competitions are batch-focused — participate to get ranked!</div>`}
     `;
@@ -1712,7 +1864,7 @@ function viewAdmin() {
     const el = $('#admin-overall');
     if (!el) return;
     el.innerHTML = `<div class="table-wrap"><table class="lb">
-      <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Total Points</th></tr></thead>
+      <thead><tr><th>Rank</th><th>Student</th><th>Enrollment</th><th>School / Program</th><th>Competitions</th><th>Integrity</th><th>Total Points</th></tr></thead>
       <tbody>${leaderboard.map((r) => `
         <tr><td class="rank-num ${r.rank <= 3 ? 'rank-' + r.rank : ''}">${medal(r.rank)}</td>
         <td><div class="user-cell"><div class="mini-avatar">${esc(initials(r.name))}</div>
@@ -1720,6 +1872,7 @@ function viewAdmin() {
         <td class="faint">${esc(r.enrollment_no || '')}</td>
         <td class="faint">${esc(r.school_name || '')} · ${esc(r.program_name || '')}</td>
         <td>${r.competitions_attempted}</td>
+        <td>${r.flagged_attempts_count > 0 ? `<span class="badge" style="background:rgba(239,68,68,0.18);color:#f87171;border:1px solid rgba(239,68,68,0.4)" title="${r.total_window_changes || 0} window switches, ${r.total_window_resizes || 0} resizes across competitions">🚩 ${r.flagged_attempts_count} Flagged</span>` : '<span class="badge" style="background:rgba(52,211,153,0.12);color:var(--green)">✔ Clean</span>'}</td>
         <td class="score-cell">${r.total_score}</td></tr>`).join('')}
       </tbody></table></div>`;
   }).catch((e) => {
@@ -1767,6 +1920,7 @@ function viewAdminStudents() {
         <td class="faint">${esc(s.program_name || '—')} · Sec ${esc(s.section || '-')} · Batch ${esc(s.batch_year || '-')}</td>
         <td><span class="badge ${s.profile_complete ? 'badge-live' : 'badge-upcoming'}">${s.profile_complete ? 'Complete' : 'Incomplete'}</span></td>
         <td>${s.stats.competitions_attempted}</td>
+        <td>${s.stats.flagged_attempts_count > 0 ? `<span class="badge" style="background:rgba(239,68,68,0.18);color:#f87171;border:1px solid rgba(239,68,68,0.4)" title="${s.stats.total_window_changes || 0} window switches, ${s.stats.total_window_resizes || 0} resizes across competitions">🚩 ${s.stats.flagged_attempts_count} Flagged</span>` : '<span class="badge" style="background:rgba(52,211,153,0.12);color:var(--green)">✔ Clean</span>'}</td>
         <td class="score-cell">${s.stats.total_score}</td>
         <td class="rank-num">${s.stats.rank ? medal(s.stats.rank) : '—'}</td>
         <td style="white-space:nowrap">
@@ -1779,7 +1933,7 @@ function viewAdminStudents() {
         <h1 style="margin-top:10px">👥 All Students</h1>
         <p class="muted" style="margin-bottom:18px">${students.length} registered students with their overall performance.</p>
         <div class="table-wrap"><table class="lb">
-          <thead><tr><th>Student</th><th>Enrollment / Admission</th><th>School</th><th>Program</th><th>Profile</th><th>Competitions</th><th>Points</th><th>Rank</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Student</th><th>Enrollment / Admission</th><th>School</th><th>Program</th><th>Profile</th><th>Competitions</th><th>Integrity</th><th>Points</th><th>Rank</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody></table></div>
       </div>`;
   }).catch((e) => { toast(e.message, 'error'); location.hash = '#/admin'; });
@@ -2604,6 +2758,7 @@ function router() {
     quizTimer = null;
     if (window._editorIntegrityInterval) { clearInterval(window._editorIntegrityInterval); window._editorIntegrityInterval = null; }
     if (window._codeEditorObserver) { window._codeEditorObserver.disconnect(); window._codeEditorObserver = null; }
+    if (integrityCleanupFn) integrityCleanupFn();
   }
   const hash = location.hash || '#/login';
   const path = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';

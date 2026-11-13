@@ -496,7 +496,11 @@ app.post('/api/questions/:id/test-run', requireAuth, async (req, res) => {
 async function leaderboardFor(competitionId) {
   const rows = await db.prepare(`
     SELECT u.id AS user_id, u.name, u.email, u.enrollment_no, u.school_name, u.program_name, u.section, u.batch_year,
-           a.score, a.correct_count, a.total_questions, a.duration_seconds, a.submitted_at
+           a.id AS attempt_id, a.score, a.correct_count, a.total_questions, a.duration_seconds, a.submitted_at,
+           COALESCE(a.window_changes_count, 0) AS window_changes_count,
+           COALESCE(a.window_resizes_count, 0) AS window_resizes_count,
+           COALESCE(a.is_flagged, 0) AS is_flagged,
+           a.flag_reason
     FROM attempts a JOIN users u ON u.id = a.user_id
     WHERE a.competition_id = ? AND a.status = 'submitted'
     ORDER BY a.score DESC, a.duration_seconds ASC, a.submitted_at ASC
@@ -514,7 +518,10 @@ async function overallLeaderboard() {
            COUNT(a.id) AS competitions_attempted,
            ROUND(AVG(100.0 * a.correct_count / NULLIF(a.total_questions, 0)), 1) AS avg_accuracy,
            COALESCE(SUM(a.duration_seconds), 0) AS total_duration,
-           MAX(a.submitted_at) AS latest_submission
+           MAX(a.submitted_at) AS latest_submission,
+           SUM(COALESCE(a.is_flagged, 0)) AS flagged_attempts_count,
+           SUM(COALESCE(a.window_changes_count, 0)) AS total_window_changes,
+           SUM(COALESCE(a.window_resizes_count, 0)) AS total_window_resizes
     FROM attempts a JOIN users u ON u.id = a.user_id
     WHERE a.status = 'submitted' AND u.role = 'student'
     GROUP BY u.id
@@ -717,7 +724,7 @@ app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req,
   });
 });
 
-async function gradeAttempt(attemptId, answers, autoSubmit = false) {
+async function gradeAttempt(attemptId, answers, autoSubmit = false, integrity = {}) {
   const attempt = await db.prepare('SELECT * FROM attempts WHERE id = ?').get(attemptId);
   if (!attempt || attempt.status === 'submitted') return null;
   const questions = await db.prepare('SELECT * FROM questions WHERE competition_id = ? ORDER BY sort_order, id').all(attempt.competition_id);
@@ -784,25 +791,97 @@ async function gradeAttempt(attemptId, answers, autoSubmit = false) {
   const started = new Date(attempt.started_at).getTime();
   const elapsed = Math.max(0, Math.round((Date.now() - started) / 1000));
   const capped = Math.min(elapsed, Math.round((new Date(comp.ends_at).getTime() - started) / 1000));
-  await db.prepare(`
-    UPDATE attempts SET status = 'submitted', submitted_at = ?, score = ?, correct_count = ?, duration_seconds = ?
-    WHERE id = ?
-  `).run(new Date().toISOString(), score, correct, autoSubmit ? capped : elapsed, attemptId);
 
-  return { score, correct, total: questions.length, details };
+  const clientChanges = Math.max(0, parseInt(integrity?.window_changes_count, 10) || 0);
+  const clientResizes = Math.max(0, parseInt(integrity?.window_resizes_count, 10) || 0);
+  const currentChanges = attempt.window_changes_count || 0;
+  const currentResizes = attempt.window_resizes_count || 0;
+  const finalChanges = Math.max(currentChanges, clientChanges);
+  const finalResizes = Math.max(currentResizes, clientResizes);
+  const isFlagged = (finalChanges > 0 || finalResizes > 0) ? 1 : 0;
+  const reasons = [];
+  if (finalChanges > 0) reasons.push(`${finalChanges} window/tab switch${finalChanges === 1 ? '' : 'es'}`);
+  if (finalResizes > 0) reasons.push(`${finalResizes} window resize${finalResizes === 1 ? '' : 's'}`);
+  const flagReason = reasons.length > 0 ? reasons.join(', ') : null;
+
+  await db.prepare(`
+    UPDATE attempts SET
+      status = 'submitted',
+      submitted_at = ?,
+      score = ?,
+      correct_count = ?,
+      duration_seconds = ?,
+      window_changes_count = ?,
+      window_resizes_count = ?,
+      is_flagged = ?,
+      flag_reason = ?
+    WHERE id = ?
+  `).run(
+    new Date().toISOString(),
+    score,
+    correct,
+    autoSubmit ? capped : elapsed,
+    finalChanges,
+    finalResizes,
+    isFlagged,
+    flagReason,
+    attemptId
+  );
+
+  return {
+    score,
+    correct,
+    total: questions.length,
+    details,
+    is_flagged: isFlagged,
+    flag_reason: flagReason,
+    window_changes_count: finalChanges,
+    window_resizes_count: finalResizes
+  };
 }
 
-/* Submit answers. Body: { answers: { [questionId]: string } } */
+/* Submit answers. Body: { answers: { [questionId]: string }, integrity: { window_changes_count, window_resizes_count } } */
 app.post('/api/attempts/:id/submit', requireAuth, async (req, res) => {
   const attempt = await db.prepare('SELECT * FROM attempts WHERE id = ?').get(req.params.id);
   if (!attempt) return res.status(404).json({ error: 'Attempt not found.' });
   if (attempt.user_id !== req.user.id) return res.status(403).json({ error: 'This is not your attempt.' });
   if (attempt.status === 'submitted') return res.status(409).json({ error: 'Already submitted.' });
 
-  const result = await gradeAttempt(attempt.id, req.body?.answers || {});
+  const result = await gradeAttempt(attempt.id, req.body?.answers || {}, false, req.body?.integrity || {});
   const lb = await leaderboardFor(attempt.competition_id);
   const me = lb.find((r) => r.user_id === req.user.id);
   res.json({ result, rank: me ? me.rank : null, participants: lb.length });
+});
+
+/* Real-time integrity event logging (window blur/visibility change/resize) */
+app.post('/api/attempts/:id/integrity-event', requireAuth, async (req, res) => {
+  const attemptId = parseInt(req.params.id, 10);
+  const attempt = await db.prepare('SELECT * FROM attempts WHERE id = ?').get(attemptId);
+  if (!attempt) return res.status(404).json({ error: 'Attempt not found.' });
+  if (attempt.user_id !== req.user.id) return res.status(403).json({ error: 'Not your attempt.' });
+  if (attempt.status === 'submitted') return res.json({ ok: false, message: 'Attempt already submitted.' });
+
+  const { window_changes_count = 0, window_resizes_count = 0 } = req.body || {};
+  const currentChanges = attempt.window_changes_count || 0;
+  const currentResizes = attempt.window_resizes_count || 0;
+  const finalChanges = Math.max(currentChanges, parseInt(window_changes_count, 10) || 0);
+  const finalResizes = Math.max(currentResizes, parseInt(window_resizes_count, 10) || 0);
+  const isFlagged = (finalChanges > 0 || finalResizes > 0) ? 1 : 0;
+  const reasons = [];
+  if (finalChanges > 0) reasons.push(`${finalChanges} window/tab switch${finalChanges === 1 ? '' : 'es'}`);
+  if (finalResizes > 0) reasons.push(`${finalResizes} window resize${finalResizes === 1 ? '' : 's'}`);
+  const flagReason = reasons.length > 0 ? reasons.join(', ') : null;
+
+  await db.prepare(`
+    UPDATE attempts SET
+      window_changes_count = ?,
+      window_resizes_count = ?,
+      is_flagged = ?,
+      flag_reason = ?
+    WHERE id = ?
+  `).run(finalChanges, finalResizes, isFlagged, flagReason, attempt.id);
+
+  res.json({ ok: true, is_flagged: isFlagged, flag_reason: flagReason });
 });
 
 app.get('/api/attempts/:id/result', requireAuth, async (req, res) => {
@@ -893,6 +972,10 @@ app.get('/api/me/participations', requireAuth, async (req, res) => {
     SELECT 
       c.id, c.title, c.starts_at, c.ends_at, 
       a.score, a.submitted_at, a.total_questions, a.correct_count,
+      COALESCE(a.is_flagged, 0) AS is_flagged,
+      a.flag_reason,
+      COALESCE(a.window_changes_count, 0) AS window_changes_count,
+      COALESCE(a.window_resizes_count, 0) AS window_resizes_count,
       r.rank,
       COALESCE(p.participants, 0) AS participants
     FROM attempts a
