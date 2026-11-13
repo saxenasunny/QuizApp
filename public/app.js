@@ -120,7 +120,14 @@ function verifyAndSyncCode(qid) {
     console.warn('[Anti-Cheat] External DOM/Inspector tampering detected on code-editor.');
     ed.value = lastCodeValue;
     quizState.answers[qid] = lastCodeValue;
+    quizState.isFlagged = true;
+    quizState.windowChangesCount = (quizState.windowChangesCount || 0) + 1;
+    updateIntegrityUi();
+    showIntegrityWarningModal('Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
     securityNotice('⚠️ Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
+    if (quizState.attempt && quizState.attempt.id) {
+      syncIntegrityEvent(quizState.attempt.id, 'inspector_tamper');
+    }
     return false;
   }
   // Ensure quizState answer strictly matches verified lastCodeValue
@@ -690,6 +697,7 @@ function startQuizIntegrityMonitoring(attemptId) {
     quizState.windowChangesCount = (quizState.windowChangesCount || 0) + 1;
     quizState.isFlagged = true;
     updateIntegrityUi();
+    showIntegrityWarningModal('Window / tab switch detected! Leaving or unfocusing the exam window is strictly prohibited.');
     securityNotice(`⚠️ Window / tab switch detected! (Count: ${quizState.windowChangesCount}). Your attempt is marked as FLAGGED for evaluation.`);
     syncIntegrityEvent(attemptId, 'window_change');
   };
@@ -727,6 +735,7 @@ function startQuizIntegrityMonitoring(attemptId) {
     quizState.windowResizesCount = (quizState.windowResizesCount || 0) + 1;
     quizState.isFlagged = true;
     updateIntegrityUi();
+    showIntegrityWarningModal('Window resize detected! Resizing or split-screening the browser during the exam is strictly prohibited.');
     securityNotice(`⚠️ Window resize detected! (Count: ${quizState.windowResizesCount}). Your attempt is marked as FLAGGED for evaluation.`);
     syncIntegrityEvent(attemptId, 'window_resize');
   };
@@ -741,6 +750,41 @@ function startQuizIntegrityMonitoring(attemptId) {
     window.removeEventListener('resize', onResize);
     integrityCleanupFn = null;
   };
+}
+
+function showIntegrityWarningModal(reason = 'Suspicious window activity detected.') {
+  const root = $('#modal-root');
+  if (!root) return;
+  const wCount = (quizState && quizState.windowChangesCount) || 1;
+  const rCount = (quizState && quizState.windowResizesCount) || 0;
+  root.innerHTML = `
+    <div class="modal-backdrop" style="background:rgba(15,3,6,0.85);backdrop-filter:blur(8px)">
+      <div class="modal-card modal-danger" role="dialog" aria-modal="true" aria-labelledby="integrity-modal-title">
+        <div class="integrity-warn-icon">🚩</div>
+        <h2 class="integrity-warn-title" id="integrity-modal-title">⚠️ EXAM INTEGRITY VIOLATION</h2>
+        <div style="display:inline-block;background:rgba(239,68,68,0.22);color:#fca5a5;border:1px solid rgba(239,68,68,0.5);font-size:12px;font-weight:800;letter-spacing:0.8px;padding:3px 12px;border-radius:999px;margin-bottom:14px">
+          STATUS: MARKED AS FLAGGED
+        </div>
+        <p class="integrity-warn-body">
+          <b>${esc(reason)}</b><br/>
+          Switching tabs, minimizing the browser, or resizing the window during this competition is strictly prohibited.
+        </p>
+        <div class="integrity-warn-stats">
+          <div><span>🔄 Window / Tab Switches:</span> <b style="color:#f87171">${wCount}</b></div>
+          <div><span>📐 Window Resizes:</span> <b style="color:#f87171">${rCount}</b></div>
+        </div>
+        <p class="muted" style="font-size:12px;margin:-6px 0 18px;color:#fca5a5;opacity:0.9">
+          ⚠️ This event has been permanently recorded and will be reviewed by the evaluator during assessment.
+        </p>
+        <button class="btn-danger-confirm" id="integrity-modal-ok-btn" type="button" onclick="closeModal()">
+          OK
+        </button>
+      </div>
+    </div>`;
+  setTimeout(() => {
+    const btn = $('#integrity-modal-ok-btn');
+    if (btn) btn.focus();
+  }, 50);
 }
 
 function updateIntegrityUi() {

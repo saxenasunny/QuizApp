@@ -420,6 +420,77 @@ a.link:hover { text-decoration: underline; }
   max-height: 85vh;
   overflow-y: auto;
 }
+/* ---------- Reddish Integrity Warning Modal ---------- */
+.modal-card.modal-danger {
+  background: linear-gradient(160deg, #22080c 0%, #130406 100%);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  box-shadow: 0 0 50px rgba(239, 68, 68, 0.3), 0 24px 60px rgba(0, 0, 0, 0.85);
+  max-width: 440px;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.modal-danger::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, #ef4444, #f87171, #dc2626);
+}
+.integrity-warn-icon {
+  font-size: 42px;
+  line-height: 1;
+  margin-bottom: 10px;
+  display: inline-block;
+  animation: pulseWarning 1.4s infinite ease-in-out;
+}
+@keyframes pulseWarning {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12); }
+}
+.integrity-warn-title {
+  color: #fca5a5;
+  font-size: 19px;
+  font-weight: 800;
+  margin: 0 0 8px;
+  letter-spacing: -0.3px;
+}
+.integrity-warn-body {
+  color: #fecaca;
+  font-size: 13.5px;
+  line-height: 1.55;
+  margin-bottom: 16px;
+}
+.integrity-warn-stats {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px dashed rgba(248, 113, 113, 0.35);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #fee2e2;
+  margin-bottom: 18px;
+  display: flex;
+  justify-content: space-around;
+  font-weight: 600;
+}
+.btn-danger-confirm {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  color: #fff;
+  border: none;
+  font-weight: 700;
+  padding: 11px 32px;
+  border-radius: 10px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(220, 38, 38, 0.4);
+  transition: all 0.15s ease;
+  font-size: 14.5px;
+  outline: none;
+}
+.btn-danger-confirm:hover {
+  background: linear-gradient(135deg, #f87171, #ef4444);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(220, 38, 38, 0.55);
+}
 .academic-school-card {
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border-strong);
