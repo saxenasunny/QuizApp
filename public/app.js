@@ -690,7 +690,7 @@ function startQuizIntegrityMonitoring(attemptId) {
   initialWinH = window.innerHeight;
 
   const onWindowChange = (type) => {
-    if (!quizState || !quizState.attempt) return;
+    if (!quizState || !quizState.attempt || quizState.isSubmitting) return;
     const now = Date.now();
     if (now - lastWindowChangeTime < 750) return; // avoid duplicate blur + visibilitychange firing
     lastWindowChangeTime = now;
@@ -703,17 +703,19 @@ function startQuizIntegrityMonitoring(attemptId) {
   };
 
   const onVisibilityChange = () => {
+    if (!quizState || !quizState.attempt || quizState.isSubmitting) return;
     if (document.visibilityState === 'hidden') {
       onWindowChange('tab_hidden');
     }
   };
 
   const onBlur = () => {
+    if (!quizState || !quizState.attempt || quizState.isSubmitting) return;
     onWindowChange('window_blur');
   };
 
   const onResize = () => {
-    if (!quizState || !quizState.attempt) return;
+    if (!quizState || !quizState.attempt || quizState.isSubmitting) return;
     const now = Date.now();
     if (now - lastWindowResizeTime < 900) return;
 
@@ -753,6 +755,7 @@ function startQuizIntegrityMonitoring(attemptId) {
 }
 
 function showIntegrityWarningModal(reason = 'Suspicious window activity detected.') {
+  if (!quizState || quizState.isSubmitting) return;
   const root = $('#modal-root');
   if (!root) return;
   const wCount = (quizState && quizState.windowChangesCount) || 1;
@@ -1355,7 +1358,7 @@ async function runCode(qid) {
 }
 
 async function submitQuiz(auto = false) {
-  if (!quizState) return;
+  if (!quizState || quizState.isSubmitting) return;
   const curQ = quizState.questions ? quizState.questions[quizState.idx] : null;
   if (curQ && curQ.type === 'output') {
     if (!verifyAndSyncCode(curQ.id) && !auto) return;
@@ -1363,29 +1366,83 @@ async function submitQuiz(auto = false) {
   saveCurrentCode();
   const s = quizState;
   const unanswered = s.questions.filter((x) => s.answers[x.id] === undefined || String(s.answers[x.id]).trim() === '').length;
-  if (!auto) {
-    const msg = unanswered > 0
-      ? `${unanswered} question(s) unanswered. Submit anyway?`
-      : 'Submit your quiz? You cannot change answers afterwards.';
-    if (!confirm(msg)) return;
+  if (auto) {
+    executeSubmitQuiz();
+    return;
   }
+
+  // Use an in-DOM modal dialog instead of native window.confirm().
+  // Native window.confirm() causes the window to lose focus (blur event), which falsely marks attempts as flagged!
+  const root = $('#modal-root');
+  if (!root) {
+    executeSubmitQuiz();
+    return;
+  }
+  root.innerHTML = `
+    <div class="modal-backdrop" onclick="if(event.target===this) closeModal()">
+      <div class="modal-card" style="max-width:440px;text-align:center">
+        <div style="font-size:38px;margin-bottom:8px">📤</div>
+        <h2 style="margin:0 0 10px;font-size:20px">Submit Competition?</h2>
+        <p class="muted" style="font-size:14px;line-height:1.6;margin-bottom:20px">
+          ${unanswered > 0
+            ? `<span style="color:#f87171;font-weight:700">⚠️ You have ${unanswered} question${unanswered > 1 ? 's' : ''} unanswered.</span><br/>Are you sure you want to finish and submit now?`
+            : 'You have answered all questions. You cannot change your answers after submission.'}
+        </p>
+        <div style="display:flex;gap:12px;justify-content:center">
+          <button class="btn btn-ghost" type="button" onclick="closeModal()">Review Answers</button>
+          <button class="btn btn-primary" type="button" id="confirm-submit-quiz-btn" onclick="executeSubmitQuiz()">Confirm &amp; Submit</button>
+        </div>
+      </div>
+    </div>`;
+  setTimeout(() => {
+    const btn = $('#confirm-submit-quiz-btn');
+    if (btn) btn.focus();
+  }, 50);
+}
+
+async function executeSubmitQuiz() {
+  if (!quizState || quizState.isSubmitting) return;
+  quizState.isSubmitting = true;
+  closeModal();
+
+  // Immediately remove integrity monitoring listeners so submission, button clicks,
+  // or navigation do NOT fire blur/visibilitychange and get counted as tab switches
+  if (integrityCleanupFn) {
+    integrityCleanupFn();
+    integrityCleanupFn = null;
+  }
+  if (window._editorIntegrityInterval) {
+    clearInterval(window._editorIntegrityInterval);
+    window._editorIntegrityInterval = null;
+  }
+  if (window._codeEditorObserver) {
+    window._codeEditorObserver.disconnect();
+    window._codeEditorObserver = null;
+  }
+  if (quizTimer) {
+    clearInterval(quizTimer);
+    quizTimer = null;
+  }
+
+  const s = quizState;
+  const integrityPayload = {
+    window_changes_count: s.windowChangesCount || 0,
+    window_resizes_count: s.windowResizesCount || 0,
+  };
+
   try {
-    const integrityPayload = {
-      window_changes_count: s.windowChangesCount || 0,
-      window_resizes_count: s.windowResizesCount || 0,
-    };
     const r = await api(`/api/attempts/${s.attempt.id}/submit`, {
       method: 'POST',
       body: { answers: s.answers, integrity: integrityPayload }
     });
-    if (integrityCleanupFn) integrityCleanupFn();
     quizState = null;
-    clearInterval(quizTimer);
-    if (window._editorIntegrityInterval) { clearInterval(window._editorIntegrityInterval); window._editorIntegrityInterval = null; }
-    if (window._codeEditorObserver) { window._codeEditorObserver.disconnect(); window._codeEditorObserver = null; }
     toast(`Submitted! You scored ${r.result.score} points.`, 'success');
     location.hash = `#/result/${s.attempt.id}`;
   } catch (e) {
+    if (quizState) {
+      quizState.isSubmitting = false;
+      if (quizState.attempt) startQuizIntegrityMonitoring(quizState.attempt.id);
+    }
     toast(e.message, 'error');
   }
 }
@@ -2797,12 +2854,14 @@ async function viewResultByComp(compId) {
 }
 
 function router() {
-  if (quizTimer && !location.hash.startsWith('#/quiz/')) {
-    clearInterval(quizTimer);
-    quizTimer = null;
+  if (!location.hash.startsWith('#/quiz/')) {
+    if (quizTimer) {
+      clearInterval(quizTimer);
+      quizTimer = null;
+    }
     if (window._editorIntegrityInterval) { clearInterval(window._editorIntegrityInterval); window._editorIntegrityInterval = null; }
     if (window._codeEditorObserver) { window._codeEditorObserver.disconnect(); window._codeEditorObserver = null; }
-    if (integrityCleanupFn) integrityCleanupFn();
+    if (integrityCleanupFn) { integrityCleanupFn(); integrityCleanupFn = null; }
   }
   const hash = location.hash || '#/login';
   const path = ME ? (ME.role === 'admin' ? '#/admin' : '#/dashboard') : '#/login';
