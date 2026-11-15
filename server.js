@@ -449,41 +449,65 @@ app.post('/api/questions/:id/test-run', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'No test cases configured for this question.' });
   }
 
-  const casePromises = testCases.map(async (tc, i) => {
+  const cases = [];
+  let compileOrRuntimeError = null;
+
+  for (let i = 0; i < testCases.length; i++) {
+    const tc = testCases[i];
     const run = await runCode(code, language, tc.input);
     const actualNorm = normalize(run.stdout);
     const expectedNorm = normalize(tc.output);
     const passed = run.ok && actualNorm === expectedNorm;
+    const runError = run.ok ? null : (run.error || 'Execution error');
 
     if (tc.hidden) {
-      return {
+      cases.push({
         case_number: i + 1,
         hidden: true,
         passed,
-        error: run.ok ? null : (run.error || 'Execution error'),
-      };
+        error: runError,
+      });
     } else {
-      return {
+      cases.push({
         case_number: i + 1,
         hidden: false,
         input: tc.input,
         expected: tc.output,
         actual: run.stdout,
         passed,
-        error: run.ok ? null : (run.error || 'Execution error'),
-      };
+        error: runError,
+      });
     }
-  });
 
-  const cases = await Promise.all(casePromises);
+    // Early exit on compilation / syntax / runtime error or timeout
+    if (!run.ok) {
+      compileOrRuntimeError = runError;
+      for (let j = i + 1; j < testCases.length; j++) {
+        const remainingTc = testCases[j];
+        cases.push({
+          case_number: j + 1,
+          hidden: Boolean(remainingTc.hidden),
+          input: remainingTc.hidden ? null : remainingTc.input,
+          expected: remainingTc.hidden ? null : remainingTc.output,
+          actual: '',
+          passed: false,
+          error: 'Skipped due to previous execution error',
+        });
+      }
+      break;
+    }
+  }
+
   const passedCount = cases.filter((c) => c.passed).length;
-  const compileOrRuntimeError = cases.find((c) => !c.passed && c.error)?.error || null;
+  if (!compileOrRuntimeError) {
+    compileOrRuntimeError = cases.find((c) => !c.passed && c.error)?.error || null;
+  }
   res.json({
     ok: true,
     summary: {
-      total: cases.length,
+      total: testCases.length,
       passed_count: passedCount,
-      all_passed: passedCount === cases.length,
+      all_passed: passedCount === testCases.length,
       error: compileOrRuntimeError,
     },
     cases,
@@ -751,21 +775,34 @@ async function gradeAttempt(attemptId, answers, autoSubmit = false, integrity = 
         const testCases = parseTestCases(q);
         totalCases = testCases.length;
         const qLang = answers[`${q.id}_lang`] || q.language || 'javascript';
-        const casePromises = testCases.map(async (tc, tIdx) => {
+        for (let tIdx = 0; tIdx < testCases.length; tIdx++) {
+          const tc = testCases[tIdx];
           const run = await runCode(given, qLang, tc.input);
           const passed = run.ok && normalize(run.stdout) === normalize(tc.output);
-          return {
+          testResults.push({
             case_number: tIdx + 1,
             hidden: tc.hidden,
             passed,
             input: tc.hidden ? null : tc.input,
             expected: tc.hidden ? null : tc.output,
             actual: tc.hidden ? null : run.stdout,
-          };
-        });
-        const parallelResults = await Promise.all(casePromises);
-        testResults.push(...parallelResults);
-        passedCount = parallelResults.filter((r) => r.passed).length;
+          });
+          // Early exit on execution/compile/syntax failure or timeout
+          if (!run.ok) {
+            for (let rem = tIdx + 1; rem < testCases.length; rem++) {
+              testResults.push({
+                case_number: rem + 1,
+                hidden: testCases[rem].hidden,
+                passed: false,
+                input: testCases[rem].hidden ? null : testCases[rem].input,
+                expected: testCases[rem].hidden ? null : testCases[rem].output,
+                actual: null,
+              });
+            }
+            break;
+          }
+        }
+        passedCount = testResults.filter((r) => r.passed).length;
         ok = totalCases > 0 && passedCount === totalCases;
         earnedPoints = totalCases > 0 ? Math.round((passedCount / totalCases) * q.points) : (ok ? q.points : 0);
       }

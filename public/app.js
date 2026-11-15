@@ -989,11 +989,18 @@ function renderQuiz() {
           oncut="return false;"
           oncontextmenu="return false;"
           ondrop="return false;">${esc(s.answers[q.id] ?? q.starter_code ?? '')}</textarea>
-        <div style="display:flex;gap:10px;margin-top:11px;flex-wrap:wrap;align-items:center">
-          <button type="button" class="btn btn-primary btn-sm" id="test-run-btn" onclick="runTestCases(${q.id})">▶ Run &amp; Check Test Cases</button>
-          <button type="button" class="btn btn-ghost btn-sm" id="run-btn" onclick="runCode(${q.id})">▶ Run Code</button>
-          <span class="faint" style="align-self:center">Checks your solution against all ${tcs.length} test case(s).</span>
-        </div>
+        ${(() => {
+          const remCooldown = Math.max(0, Math.ceil((quizRunCooldownUntil - Date.now()) / 1000));
+          const cooldownAttr = remCooldown > 0 ? 'disabled' : '';
+          const testBtnText = remCooldown > 0 ? `⏳ Please wait ${remCooldown}s…` : '▶ Run &amp; Check Test Cases';
+          const runBtnText = remCooldown > 0 ? `⏳ Please wait ${remCooldown}s…` : '▶ Run Code';
+          return `
+          <div style="display:flex;gap:10px;margin-top:11px;flex-wrap:wrap;align-items:center">
+            <button type="button" class="btn btn-primary btn-sm" id="test-run-btn" ${cooldownAttr} onclick="runTestCases(${q.id})">${testBtnText}</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="run-btn" ${cooldownAttr} onclick="runCode(${q.id})">${runBtnText}</button>
+            <span class="faint" style="align-self:center">Checks your solution against all ${tcs.length} test case(s).</span>
+          </div>`;
+        })()}
         <div class="console-out hidden" id="console-out"></div>
         <div class="tc-panel">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -1035,6 +1042,10 @@ function renderQuiz() {
 
   // Attach anti-cheat protections for participants in practical coding
   if (q.type !== 'mcq') {
+    const remCool = Math.max(0, Math.ceil((quizRunCooldownUntil - Date.now()) / 1000));
+    if (remCool > 0 && !quizCooldownTimer) {
+      startRunCooldown(remCool, false);
+    }
     const ed = $('#code-editor');
     if (ed) {
       allowCodeExpansion = true;
@@ -1273,10 +1284,232 @@ function switchTcTab(qid, tabIdx) {
   renderQuiz();
 }
 
+/* ============================================================
+   CODE EXECUTION: COOLDOWN & CLIENT-SIDE JS WORKER SANDBOX
+   ============================================================ */
+let quizRunCooldownUntil = 0;
+let quizCooldownTimer = null;
+
+function startRunCooldown(seconds = 6, resetTarget = true) {
+  if (resetTarget) {
+    quizRunCooldownUntil = Date.now() + (seconds * 1000);
+  }
+  updateRunButtonsCooldown();
+  if (quizCooldownTimer) clearInterval(quizCooldownTimer);
+  quizCooldownTimer = setInterval(() => {
+    const remaining = Math.ceil((quizRunCooldownUntil - Date.now()) / 1000);
+    if (remaining <= 0) {
+      clearInterval(quizCooldownTimer);
+      quizCooldownTimer = null;
+      quizRunCooldownUntil = 0;
+      resetRunButtons();
+    } else {
+      updateRunButtonsCooldown(remaining);
+    }
+  }, 500);
+}
+
+function updateRunButtonsCooldown(remaining) {
+  const rem = remaining !== undefined ? remaining : Math.ceil((quizRunCooldownUntil - Date.now()) / 1000);
+  if (rem <= 0) {
+    resetRunButtons();
+    return;
+  }
+  const testBtn = $('#test-run-btn');
+  const runBtn = $('#run-btn');
+  if (testBtn) {
+    testBtn.disabled = true;
+    testBtn.textContent = `⏳ Please wait ${rem}s…`;
+  }
+  if (runBtn) {
+    runBtn.disabled = true;
+    runBtn.textContent = `⏳ Please wait ${rem}s…`;
+  }
+}
+
+function resetRunButtons() {
+  const testBtn = $('#test-run-btn');
+  const runBtn = $('#run-btn');
+  if (testBtn) {
+    testBtn.disabled = false;
+    testBtn.textContent = '▶ Run & Check Test Cases';
+  }
+  if (runBtn) {
+    runBtn.disabled = false;
+    runBtn.textContent = '▶ Run Code';
+  }
+}
+
+function runJsInWorker(code, stdin = '', timeoutMs = 3000) {
+  if (typeof Worker === 'undefined') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const workerScript = `
+      self.onmessage = function(e) {
+        var data = e.data || {};
+        var code = data.code || '';
+        var stdin = String(data.stdin || '');
+        var logs = [];
+
+        function formatArg(a) {
+          if (a === null) return 'null';
+          if (a === undefined) return 'undefined';
+          if (typeof a === 'object') {
+            try { return JSON.stringify(a); } catch (e) { return String(a); }
+          }
+          return String(a);
+        }
+
+        var customConsole = {
+          log: function() {
+            var args = Array.prototype.slice.call(arguments);
+            logs.push(args.map(formatArg).join(' '));
+          },
+          error: function() {
+            var args = Array.prototype.slice.call(arguments);
+            logs.push(args.map(formatArg).join(' '));
+          },
+          warn: function() {
+            var args = Array.prototype.slice.call(arguments);
+            logs.push(args.map(formatArg).join(' '));
+          },
+          info: function() {
+            var args = Array.prototype.slice.call(arguments);
+            logs.push(args.map(formatArg).join(' '));
+          }
+        };
+
+        var stdinLines = stdin.length ? stdin.split(/\\r?\\n/) : [];
+        var stdinIdx = 0;
+        var readline = function() {
+          return stdinIdx < stdinLines.length ? stdinLines[stdinIdx++] : '';
+        };
+
+        var mockProcess = {
+          stdin: {
+            on: function() {},
+            read: function() { return stdin; }
+          },
+          stdout: {
+            write: function() {
+              var args = Array.prototype.slice.call(arguments);
+              logs.push(args.join(' '));
+            }
+          },
+          argv: ['node', 'index.js'],
+          env: {},
+          exit: function() {}
+        };
+
+        var mockFs = {
+          readFileSync: function(fd) {
+            if (fd === 0 || fd === '/dev/stdin') return stdin;
+            return '';
+          }
+        };
+
+        var mockRequire = function(mod) {
+          if (mod === 'fs') return mockFs;
+          if (mod === 'readline') {
+            return {
+              createInterface: function() {
+                return {
+                  on: function(ev, cb) {
+                    if (ev === 'line') {
+                      for (var i = 0; i < stdinLines.length; i++) cb(stdinLines[i]);
+                    }
+                    if (ev === 'close') setTimeout(cb, 0);
+                  }
+                };
+              }
+            };
+          }
+          return {};
+        };
+
+        try {
+          self.fetch = undefined;
+          self.XMLHttpRequest = undefined;
+          self.WebSocket = undefined;
+          self.importScripts = undefined;
+
+          var fn = new Function('console', 'readline', 'read_line', 'prompt', 'process', 'fs', 'require', 'stdin', code);
+          var res = fn(customConsole, readline, readline, readline, mockProcess, mockFs, mockRequire, stdin);
+
+          var output = logs.join('\\n');
+          if (output.length === 0 && res !== undefined) {
+            output = formatArg(res);
+          }
+          self.postMessage({ ok: true, stdout: output, error: '' });
+        } catch (err) {
+          self.postMessage({ ok: false, stdout: logs.join('\\n'), error: String(err && err.message ? err.message : err) });
+        }
+      };
+    `;
+
+    var blob;
+    try {
+      blob = new Blob([workerScript], { type: 'application/javascript' });
+    } catch (e) {
+      return resolve(null);
+    }
+    var workerUrl = URL.createObjectURL(blob);
+    var worker = null;
+    var timer = null;
+    var resolved = false;
+
+    function cleanup() {
+      if (timer) clearTimeout(timer);
+      if (worker) {
+        try { worker.terminate(); } catch (e) {}
+        worker = null;
+      }
+      try { URL.revokeObjectURL(workerUrl); } catch (e) {}
+    }
+
+    try {
+      worker = new Worker(workerUrl);
+      timer = setTimeout(function() {
+        if (!resolved) {
+          resolved = true;
+          cleanup();
+          resolve({ ok: false, error: '⏱ Time limit exceeded (3s limit). Infinite loop detected?', stdout: '' });
+        }
+      }, timeoutMs);
+
+      worker.onmessage = function(ev) {
+        if (!resolved) {
+          resolved = true;
+          cleanup();
+          resolve(ev.data);
+        }
+      };
+
+      worker.onerror = function(err) {
+        if (!resolved) {
+          resolved = true;
+          cleanup();
+          resolve({ ok: false, error: String(err && err.message ? err.message : 'Worker execution error'), stdout: '' });
+        }
+      };
+
+      worker.postMessage({ code: code, stdin: stdin });
+    } catch (err) {
+      cleanup();
+      resolve(null);
+    }
+  });
+}
+
 async function runTestCases(qid) {
   if (!verifyAndSyncCode(qid)) return;
   saveCurrentCode();
+  const rem = Math.ceil((quizRunCooldownUntil - Date.now()) / 1000);
+  if (rem > 0) {
+    toast(`⏳ Please wait ${rem}s before running again.`, 'info');
+    return;
+  }
   const btn = $('#test-run-btn');
+  const runBtn = $('#run-btn');
   const code = lastCodeValue || quizState.answers[qid] || '';
   const language = quizState.answers[`${qid}_lang`] || quizState.questions[quizState.idx].language || 'javascript';
   if (!code.trim()) {
@@ -1286,6 +1519,9 @@ async function runTestCases(qid) {
   if (btn) {
     btn.disabled = true;
     btn.textContent = '⏳ Testing code…';
+  }
+  if (runBtn) {
+    runBtn.disabled = true;
   }
   try {
     const res = await api(`/api/questions/${qid}/test-run`, {
@@ -1303,17 +1539,22 @@ async function runTestCases(qid) {
     renderQuiz();
   } catch (e) {
     toast(e.message, 'error');
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = '▶ Run & Check Test Cases';
-    }
+  } finally {
+    startRunCooldown(6);
   }
 }
 
 async function runCode(qid) {
   if (!verifyAndSyncCode(qid)) return;
   saveCurrentCode();
+  const rem = Math.ceil((quizRunCooldownUntil - Date.now()) / 1000);
+  if (rem > 0) {
+    toast(`⏳ Please wait ${rem}s before running again.`, 'info');
+    return;
+  }
+
   const btn = $('#run-btn');
+  const testBtn = $('#test-run-btn');
   const out = $('#console-out');
   const code = lastCodeValue || quizState.answers[qid] || '';
   const language = quizState.answers[`${qid}_lang`] || quizState.questions[quizState.idx].language || 'javascript';
@@ -1338,11 +1579,23 @@ async function runCode(qid) {
     }
   }
 
-  btn.disabled = true; btn.textContent = '⏳ Running…';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Running…'; }
+  if (testBtn) { testBtn.disabled = true; }
   out.classList.remove('hidden', 'ok', 'err');
   out.textContent = `Running your ${language} code${caseLabel}…`;
+
   try {
-    const r = await api('/api/run', { method: 'POST', body: { code, language, stdin } });
+    let r = null;
+    const isJs = language === 'javascript' || language === 'js';
+    if (isJs) {
+      // Execute in fast isolated Client-Side Web Worker sandbox (0 API hits, 0 server load)
+      r = await runJsInWorker(code, stdin, 3000);
+    }
+    if (!r) {
+      // Fallback to server execution
+      r = await api('/api/run', { method: 'POST', body: { code, language, stdin } });
+    }
+
     if (r.ok) {
       out.classList.add('ok');
       out.textContent = '✔ Finished successfully\n\n' + (r.stdout || `(no output — did you forget ${getPrintHint(language)}?)`);
@@ -1353,8 +1606,9 @@ async function runCode(qid) {
   } catch (e) {
     out.classList.add('err');
     out.textContent = e.message;
+  } finally {
+    startRunCooldown(6);
   }
-  btn.disabled = false; btn.textContent = '▶ Run Code';
 }
 
 async function submitQuiz(auto = false) {
@@ -1422,6 +1676,11 @@ async function executeSubmitQuiz() {
   if (quizTimer) {
     clearInterval(quizTimer);
     quizTimer = null;
+  }
+  if (quizCooldownTimer) {
+    clearInterval(quizCooldownTimer);
+    quizCooldownTimer = null;
+    quizRunCooldownUntil = 0;
   }
 
   const s = quizState;
@@ -2858,6 +3117,11 @@ function router() {
     if (quizTimer) {
       clearInterval(quizTimer);
       quizTimer = null;
+    }
+    if (quizCooldownTimer) {
+      clearInterval(quizCooldownTimer);
+      quizCooldownTimer = null;
+      quizRunCooldownUntil = 0;
     }
     if (window._editorIntegrityInterval) { clearInterval(window._editorIntegrityInterval); window._editorIntegrityInterval = null; }
     if (window._codeEditorObserver) { window._codeEditorObserver.disconnect(); window._codeEditorObserver = null; }
