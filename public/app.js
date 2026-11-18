@@ -829,9 +829,16 @@ function viewQuiz(compId) {
   $('#app').innerHTML = '<div class="spinner"></div>';
   api(`/api/competitions/${compId}/start`, { method: 'POST' })
     .then((data) => {
+      // Calculate remaining duration directly from server to eliminate client hardware clock skew
+      const remainingMs = Math.max(0, (data.attempt.remaining_seconds !== undefined
+        ? data.attempt.remaining_seconds * 1000
+        : (data.attempt.deadline - Date.now())));
+      const clientDeadline = Date.now() + remainingMs;
+
       quizState = {
         compId,
         attempt: data.attempt,
+        clientDeadline,
         competition: data.competition,
         questions: data.questions,
         idx: 0,
@@ -846,7 +853,7 @@ function viewQuiz(compId) {
       renderQuiz();
       if (quizTimer) clearInterval(quizTimer);
       quizTimer = setInterval(() => {
-        const rem = quizState.attempt.deadline - Date.now();
+        const rem = (quizState && quizState.clientDeadline ? quizState.clientDeadline - Date.now() : 0);
         const t = $('#quiz-timer');
         if (t) {
           t.textContent = timeLeftStr(rem);
@@ -1019,7 +1026,7 @@ function renderQuiz() {
           <b style="font-size:15px">${esc(s.competition.title)}</b>
           <div class="faint">Question ${s.idx + 1} of ${s.questions.length} · ${answeredCount} answered</div>
         </div>
-        <div class="timer" id="quiz-timer">${timeLeftStr(s.attempt.deadline - Date.now())}</div>
+        <div class="timer" id="quiz-timer">${timeLeftStr(s.clientDeadline ? s.clientDeadline - Date.now() : (s.attempt.deadline - Date.now()))}</div>
         <div class="q-dots">${dots}</div>
         <div id="quiz-integrity-wrap" style="display:inline-flex;align-items:center;margin-left:auto;gap:10px">
           ${renderIntegrityIndicator(s)}

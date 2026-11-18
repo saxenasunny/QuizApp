@@ -717,17 +717,26 @@ app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req,
   const questions = shuffleWithSeed(rawQuestions, attempt.id);
 
   // Auto-submit if the window (duration) has elapsed
+  const serverNow = Date.now();
   const deadline = Math.min(
     new Date(comp.ends_at).getTime(),
     new Date(attempt.started_at).getTime() + comp.duration_minutes * 60000
   );
-  if (Date.now() > deadline) {
+  if (serverNow > deadline) {
     await gradeAttempt(attempt.id, {}, true);
     return res.status(409).json({ error: 'Time is up — your answers were auto-submitted.', code: 'TIME_UP' });
   }
 
+  const remainingSeconds = Math.max(0, Math.floor((deadline - serverNow) / 1000));
+
   res.json({
-    attempt: { id: attempt.id, started_at: attempt.started_at, deadline },
+    attempt: {
+      id: attempt.id,
+      started_at: attempt.started_at,
+      deadline,
+      remaining_seconds: remainingSeconds,
+      server_time: serverNow,
+    },
     competition: { id: comp.id, title: comp.title, duration_minutes: comp.duration_minutes, ends_at: comp.ends_at },
     questions: questions.map((q) => ({
       id: q.id,
