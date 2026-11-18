@@ -1003,8 +1003,8 @@ function renderQuiz() {
           const runBtnText = remCooldown > 0 ? `⏳ Please wait ${remCooldown}s…` : '▶ Run Code';
           return `
           <div style="display:flex;gap:10px;margin-top:11px;flex-wrap:wrap;align-items:center">
-            <button type="button" class="btn btn-primary btn-sm" id="test-run-btn" ${cooldownAttr} onclick="runTestCases(${q.id})">${testBtnText}</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="run-btn" ${cooldownAttr} onclick="runCode(${q.id})">${runBtnText}</button>
+            <button type="button" class="btn btn-primary btn-sm" id="run-btn" ${cooldownAttr} onclick="runCode(${q.id})">${runBtnText}</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="test-run-btn" ${cooldownAttr} onclick="runTestCases(${q.id})">${testBtnText}</button>
             <span class="faint" style="align-self:center">Checks your solution against all ${tcs.length} test case(s).</span>
           </div>`;
         })()}
