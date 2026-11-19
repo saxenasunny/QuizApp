@@ -265,6 +265,17 @@ function renderNav(active = '') {
 }
 
 async function logout() {
+  if (quizState && quizState.attempt && !quizState.isSubmitting) {
+    const attemptId = quizState.attempt.id;
+    quizState.windowChangesCount = (quizState.windowChangesCount || 0) + 1;
+    quizState.isFlagged = true;
+    persistIntegrityLocal(attemptId);
+    updateIntegrityUi();
+    syncIntegrityEvent(attemptId, 'internal_tab_switch');
+    showIntegrityWarningModal('You cannot log out during an active exam! Leaving the competition is strictly prohibited and your attempt has been marked as FLAGGED.');
+    securityNotice(`⚠️ Navigation violation detected! Attempting to log out during an active competition is prohibited. (Count: ${quizState.windowChangesCount}).`);
+    return;
+  }
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
   ME = null;
   apiCache.clear();
@@ -3174,6 +3185,20 @@ async function viewResultByComp(compId) {
 }
 
 function router() {
+  const currentQuizCompId = quizState && (quizState.compId || (quizState.attempt && quizState.attempt.competition_id));
+  if (quizState && quizState.attempt && !quizState.isSubmitting && currentQuizCompId && location.hash !== `#/quiz/${currentQuizCompId}`) {
+    const attemptId = quizState.attempt.id;
+    quizState.windowChangesCount = (quizState.windowChangesCount || 0) + 1;
+    quizState.isFlagged = true;
+    persistIntegrityLocal(attemptId);
+    updateIntegrityUi();
+    syncIntegrityEvent(attemptId, 'internal_tab_switch');
+    showIntegrityWarningModal('Leaving the competition screen to browse other tabs or pages (Leaderboards, Competitions, etc.) is strictly prohibited! Your attempt has been marked as FLAGGED.');
+    securityNotice(`⚠️ Navigation violation detected! (Count: ${quizState.windowChangesCount}). Your attempt is marked as FLAGGED for evaluation.`);
+    history.replaceState(null, '', `#/quiz/${currentQuizCompId}`);
+    return;
+  }
+
   if (!location.hash.startsWith('#/quiz/')) {
     if (quizTimer) {
       clearInterval(quizTimer);
