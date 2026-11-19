@@ -122,6 +122,7 @@ function verifyAndSyncCode(qid) {
     quizState.answers[qid] = lastCodeValue;
     quizState.isFlagged = true;
     quizState.windowChangesCount = (quizState.windowChangesCount || 0) + 1;
+    if (quizState.attempt && quizState.attempt.id) persistIntegrityLocal(quizState.attempt.id);
     updateIntegrityUi();
     showIntegrityWarningModal('Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
     securityNotice('⚠️ Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
@@ -696,6 +697,7 @@ function startQuizIntegrityMonitoring(attemptId) {
     lastWindowChangeTime = now;
     quizState.windowChangesCount = (quizState.windowChangesCount || 0) + 1;
     quizState.isFlagged = true;
+    persistIntegrityLocal(attemptId);
     updateIntegrityUi();
     showIntegrityWarningModal('Window / tab switch detected! Leaving or unfocusing the exam window is strictly prohibited.');
     securityNotice(`⚠️ Window / tab switch detected! (Count: ${quizState.windowChangesCount}). Your attempt is marked as FLAGGED for evaluation.`);
@@ -736,6 +738,7 @@ function startQuizIntegrityMonitoring(attemptId) {
     initialWinH = window.innerHeight;
     quizState.windowResizesCount = (quizState.windowResizesCount || 0) + 1;
     quizState.isFlagged = true;
+    persistIntegrityLocal(attemptId);
     updateIntegrityUi();
     showIntegrityWarningModal('Window resize detected! Resizing or split-screening the browser during the exam is strictly prohibited.');
     securityNotice(`⚠️ Window resize detected! (Count: ${quizState.windowResizesCount}). Your attempt is marked as FLAGGED for evaluation.`);
@@ -802,8 +805,20 @@ function updateIntegrityUi() {
   }
 }
 
+function persistIntegrityLocal(attemptId) {
+  if (!quizState || !attemptId) return;
+  try {
+    localStorage.setItem(`quiz_integrity_${attemptId}`, JSON.stringify({
+      window_changes_count: quizState.windowChangesCount || 0,
+      window_resizes_count: quizState.windowResizesCount || 0,
+      is_flagged: Boolean(quizState.isFlagged),
+    }));
+  } catch {}
+}
+
 async function syncIntegrityEvent(attemptId, type) {
   if (!quizState || !quizState.attempt) return;
+  persistIntegrityLocal(attemptId);
   try {
     await api(`/api/attempts/${attemptId}/integrity-event`, {
       method: 'POST',
@@ -835,6 +850,29 @@ function viewQuiz(compId) {
         : (data.attempt.deadline - Date.now())));
       const clientDeadline = Date.now() + remainingMs;
 
+      // Restore integrity counts from server attempt and local storage fallback
+      let savedLocalIntegrity = null;
+      try {
+        const localRaw = localStorage.getItem(`quiz_integrity_${data.attempt.id}`);
+        if (localRaw) savedLocalIntegrity = JSON.parse(localRaw);
+      } catch {}
+
+      const sChanges = data.attempt.window_changes_count || 0;
+      const sResizes = data.attempt.window_resizes_count || 0;
+      const lChanges = (savedLocalIntegrity && savedLocalIntegrity.window_changes_count) || 0;
+      const lResizes = (savedLocalIntegrity && savedLocalIntegrity.window_resizes_count) || 0;
+
+      const initialChanges = Math.max(sChanges, lChanges);
+      const initialResizes = Math.max(sResizes, lResizes);
+      const initialFlagged = Boolean(data.attempt.is_flagged || (savedLocalIntegrity && savedLocalIntegrity.is_flagged) || (initialChanges > 0 || initialResizes > 0));
+
+      // Restore previously saved answers on page reload so student's code/answers are not lost
+      let initialAnswers = {};
+      try {
+        const localAnswers = localStorage.getItem(`quiz_answers_${data.attempt.id}`);
+        if (localAnswers) initialAnswers = JSON.parse(localAnswers);
+      } catch {}
+
       quizState = {
         compId,
         attempt: data.attempt,
@@ -842,13 +880,17 @@ function viewQuiz(compId) {
         competition: data.competition,
         questions: data.questions,
         idx: 0,
-        answers: {},
+        answers: initialAnswers,
         testResults: {},
         activeTcTab: {},
-        windowChangesCount: data.attempt.window_changes_count || 0,
-        windowResizesCount: data.attempt.window_resizes_count || 0,
-        isFlagged: Boolean(data.attempt.is_flagged),
+        windowChangesCount: initialChanges,
+        windowResizesCount: initialResizes,
+        isFlagged: initialFlagged,
       };
+      persistIntegrityLocal(data.attempt.id);
+      if (initialChanges > sChanges || initialResizes > sResizes) {
+        syncIntegrityEvent(data.attempt.id, 'restored');
+      }
       startQuizIntegrityMonitoring(data.attempt.id);
       renderQuiz();
       if (quizTimer) clearInterval(quizTimer);
@@ -1271,11 +1313,17 @@ function goQ(i) {
 function selectOption(qid, optIdx) {
   const q = quizState.questions.find((x) => x.id === qid);
   quizState.answers[qid] = q.options[optIdx];
+  if (quizState && quizState.attempt) {
+    try { localStorage.setItem(`quiz_answers_${quizState.attempt.id}`, JSON.stringify(quizState.answers)); } catch {}
+  }
   renderQuiz();
 }
 
 function saveCode(qid) {
   verifyAndSyncCode(qid);
+  if (quizState && quizState.attempt) {
+    try { localStorage.setItem(`quiz_answers_${quizState.attempt.id}`, JSON.stringify(quizState.answers)); } catch {}
+  }
 }
 
 function saveCurrentCode() {
@@ -1701,6 +1749,12 @@ async function executeSubmitQuiz() {
       method: 'POST',
       body: { answers: s.answers, integrity: integrityPayload }
     });
+    if (s && s.attempt) {
+      try {
+        localStorage.removeItem(`quiz_integrity_${s.attempt.id}`);
+        localStorage.removeItem(`quiz_answers_${s.attempt.id}`);
+      } catch {}
+    }
     quizState = null;
     toast(`Submitted! You scored ${r.result.score} points.`, 'success');
     location.hash = `#/result/${s.attempt.id}`;
