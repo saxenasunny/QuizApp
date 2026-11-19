@@ -104,6 +104,8 @@ CREATE TABLE IF NOT EXISTS competitions (
   starts_at        TEXT NOT NULL,
   ends_at          TEXT NOT NULL,
   duration_minutes INTEGER NOT NULL DEFAULT 30,
+  max_window_changes INTEGER NOT NULL DEFAULT 2,
+  max_window_resizes INTEGER NOT NULL DEFAULT 1,
   created_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_at       TEXT NOT NULL
 );
@@ -328,6 +330,12 @@ async function init() {
           } catch {}
         }
         try {
+          await client.execute('SELECT max_window_changes FROM competitions LIMIT 1');
+        } catch {
+          try { await client.execute('ALTER TABLE competitions ADD COLUMN max_window_changes INTEGER NOT NULL DEFAULT 2'); } catch {}
+          try { await client.execute('ALTER TABLE competitions ADD COLUMN max_window_resizes INTEGER NOT NULL DEFAULT 1'); } catch {}
+        }
+        try {
           await client.execute('SELECT test_cases_json FROM questions LIMIT 1');
         } catch {
           try {
@@ -377,6 +385,12 @@ async function init() {
       }
       try {
         await client.execute('ALTER TABLE competitions ADD COLUMN batch_year TEXT');
+      } catch {}
+      try {
+        await client.execute('ALTER TABLE competitions ADD COLUMN max_window_changes INTEGER NOT NULL DEFAULT 2');
+      } catch {}
+      try {
+        await client.execute('ALTER TABLE competitions ADD COLUMN max_window_resizes INTEGER NOT NULL DEFAULT 1');
       } catch {}
       try {
         await client.execute('ALTER TABLE questions ADD COLUMN test_cases_json TEXT');

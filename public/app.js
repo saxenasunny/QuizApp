@@ -127,8 +127,9 @@ function verifyAndSyncCode(qid) {
     if (quizState.attempt && quizState.attempt.id) {
       syncIntegrityEvent(quizState.attempt.id, 'inspector_tamper');
     }
-    if (quizState.windowChangesCount >= 3) {
-      triggerIntegrityAutoSubmit('More than 2 window switch / tampering attempts detected. Your test has been automatically submitted.');
+    const maxChanges = (quizState && quizState.maxWindowChanges !== undefined) ? quizState.maxWindowChanges : 2;
+    if (quizState.windowChangesCount > maxChanges) {
+      triggerIntegrityAutoSubmit(`More than ${maxChanges} window switch / tampering attempt${maxChanges === 1 ? '' : 's'} detected. Your test has been automatically submitted.`);
       return false;
     }
     showIntegrityWarningModal('Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
@@ -277,16 +278,17 @@ async function logout() {
     updateIntegrityUi();
     syncIntegrityEvent(attemptId, 'internal_tab_switch');
 
-    if (quizState.windowChangesCount >= 3) {
-      triggerIntegrityAutoSubmit('More than 2 window switch attempts detected. Your test has been automatically submitted.');
+    const maxChanges = (quizState && quizState.maxWindowChanges !== undefined) ? quizState.maxWindowChanges : 2;
+    if (quizState.windowChangesCount > maxChanges) {
+      triggerIntegrityAutoSubmit(`More than ${maxChanges} window switch attempt${maxChanges === 1 ? '' : 's'} detected. Your test has been automatically submitted.`);
       return;
     }
 
-    const warnMsg = quizState.windowChangesCount === 2
-      ? '⚠️ FINAL WARNING: 2 tab switch attempts recorded! On the next attempt, your exam will be automatically submitted.'
-      : 'You cannot log out during an active exam! Leaving the competition is strictly prohibited and your attempt has been marked as FLAGGED. (1 of 2 allowed)';
+    const warnMsg = quizState.windowChangesCount === maxChanges
+      ? `⚠️ FINAL WARNING: ${quizState.windowChangesCount} tab switch attempts recorded! On the next attempt, your exam will be automatically submitted.`
+      : `You cannot log out during an active exam! Leaving the competition is strictly prohibited and your attempt has been marked as FLAGGED. (${quizState.windowChangesCount} of ${maxChanges} allowed)`;
     showIntegrityWarningModal(warnMsg);
-    securityNotice(`⚠️ Navigation violation detected! Attempting to log out during an active competition is prohibited. (Count: ${quizState.windowChangesCount}/2).`);
+    securityNotice(`⚠️ Navigation violation detected! Attempting to log out during an active competition is prohibited. (Count: ${quizState.windowChangesCount}/${maxChanges}).`);
     return;
   }
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
@@ -725,16 +727,17 @@ function startQuizIntegrityMonitoring(attemptId) {
     updateIntegrityUi();
     syncIntegrityEvent(attemptId, 'window_change');
 
-    if (quizState.windowChangesCount >= 3) {
-      triggerIntegrityAutoSubmit('More than 2 window switch attempts detected. Your test has been automatically submitted.');
+    const maxChanges = (quizState && quizState.maxWindowChanges !== undefined) ? quizState.maxWindowChanges : 2;
+    if (quizState.windowChangesCount > maxChanges) {
+      triggerIntegrityAutoSubmit(`More than ${maxChanges} window switch attempt${maxChanges === 1 ? '' : 's'} detected. Your test has been automatically submitted.`);
       return;
     }
 
-    const warnMsg = quizState.windowChangesCount === 2
-      ? '⚠️ FINAL WARNING: 2 window/tab switches recorded! On the next attempt, your exam will be automatically submitted.'
-      : 'Window / tab switch detected (1 of 2 allowed)! Leaving or unfocusing the exam window is strictly prohibited.';
+    const warnMsg = quizState.windowChangesCount === maxChanges
+      ? `⚠️ FINAL WARNING: ${quizState.windowChangesCount} window/tab switch${quizState.windowChangesCount === 1 ? '' : 'es'} recorded! On the next attempt, your exam will be automatically submitted.`
+      : `Window / tab switch detected (${quizState.windowChangesCount} of ${maxChanges} allowed)! Leaving or unfocusing the exam window is strictly prohibited.`;
     showIntegrityWarningModal(warnMsg);
-    securityNotice(`⚠️ Window / tab switch detected! (Count: ${quizState.windowChangesCount}/2). Your attempt is marked as FLAGGED for evaluation.`);
+    securityNotice(`⚠️ Window / tab switch detected! (Count: ${quizState.windowChangesCount}/${maxChanges}). Your attempt is marked as FLAGGED for evaluation.`);
   };
 
   const onVisibilityChange = () => {
@@ -775,13 +778,17 @@ function startQuizIntegrityMonitoring(attemptId) {
     updateIntegrityUi();
     syncIntegrityEvent(attemptId, 'window_resize');
 
-    if (quizState.windowResizesCount >= 2) {
-      triggerIntegrityAutoSubmit('More than 1 window resize attempt detected. Your test has been automatically submitted.');
+    const maxResizes = (quizState && quizState.maxWindowResizes !== undefined) ? quizState.maxWindowResizes : 1;
+    if (quizState.windowResizesCount > maxResizes) {
+      triggerIntegrityAutoSubmit(`More than ${maxResizes} window resize attempt${maxResizes === 1 ? '' : 's'} detected. Your test has been automatically submitted.`);
       return;
     }
 
-    showIntegrityWarningModal('⚠️ FINAL WARNING: Window resize detected (1 of 1 allowed)! On the next resize attempt, your exam will be automatically submitted.');
-    securityNotice(`⚠️ Window resize detected! (Count: ${quizState.windowResizesCount}/1). Your attempt is marked as FLAGGED for evaluation.`);
+    const warnMsg = quizState.windowResizesCount === maxResizes
+      ? `⚠️ FINAL WARNING: ${quizState.windowResizesCount} window resize recorded! On the next resize attempt, your exam will be automatically submitted.`
+      : `Window resize detected (${quizState.windowResizesCount} of ${maxResizes} allowed)! Resizing or split-screening the browser during the exam is strictly prohibited.`;
+    showIntegrityWarningModal(warnMsg);
+    securityNotice(`⚠️ Window resize detected! (Count: ${quizState.windowResizesCount}/${maxResizes}). Your attempt is marked as FLAGGED for evaluation.`);
   };
 
   document.addEventListener('visibilitychange', onVisibilityChange);
@@ -802,6 +809,8 @@ function showIntegrityWarningModal(reason = 'Suspicious window activity detected
   if (!root) return;
   const wCount = (quizState && quizState.windowChangesCount) || 1;
   const rCount = (quizState && quizState.windowResizesCount) || 0;
+  const maxW = (quizState && quizState.maxWindowChanges !== undefined) ? quizState.maxWindowChanges : 2;
+  const maxR = (quizState && quizState.maxWindowResizes !== undefined) ? quizState.maxWindowResizes : 1;
   root.innerHTML = `
     <div class="modal-backdrop" style="background:rgba(15,3,6,0.85);backdrop-filter:blur(8px)">
       <div class="modal-card modal-danger" role="dialog" aria-modal="true" aria-labelledby="integrity-modal-title">
@@ -815,8 +824,8 @@ function showIntegrityWarningModal(reason = 'Suspicious window activity detected
           Switching tabs, minimizing the browser, or resizing the window during this competition is strictly prohibited.
         </p>
         <div class="integrity-warn-stats">
-          <div><span>🔄 Window / Tab Switches:</span> <b style="color:#f87171">${wCount} / 2 allowed</b></div>
-          <div><span>📐 Window Resizes:</span> <b style="color:#f87171">${rCount} / 1 allowed</b></div>
+          <div><span>🔄 Window / Tab Switches:</span> <b style="color:#f87171">${wCount} / ${maxW} allowed</b></div>
+          <div><span>📐 Window Resizes:</span> <b style="color:#f87171">${rCount} / ${maxR} allowed</b></div>
         </div>
         <p class="muted" style="font-size:12px;margin:-6px 0 18px;color:#fca5a5;opacity:0.9">
           ⚠️ This event has been permanently recorded and will be reviewed by the evaluator during assessment.
@@ -880,6 +889,8 @@ async function triggerIntegrityAutoSubmit(reason = 'Violation limit exceeded. Te
   };
   const wCount = s.windowChangesCount || 0;
   const rCount = s.windowResizesCount || 0;
+  const maxW = (s && s.maxWindowChanges !== undefined) ? s.maxWindowChanges : 2;
+  const maxR = (s && s.maxWindowResizes !== undefined) ? s.maxWindowResizes : 1;
 
   const root = $('#modal-root');
   if (root) {
@@ -893,11 +904,11 @@ async function triggerIntegrityAutoSubmit(reason = 'Violation limit exceeded. Te
           </div>
           <p class="integrity-warn-body">
             <b style="color:#fca5a5;font-size:14px">${esc(reason)}</b><br/><br/>
-            You have exceeded the maximum allowed activity limit (maximum 2 window switches or 1 window resize). Your answers have been automatically finalized and submitted for evaluation.
+            You have exceeded the maximum allowed activity limit (maximum ${maxW} window switch${maxW === 1 ? '' : 'es'} or ${maxR} window resize${maxR === 1 ? '' : 's'}). Your answers have been automatically finalized and submitted for evaluation.
           </p>
           <div class="integrity-warn-stats">
-            <div><span>🔄 Window / Tab Switches:</span> <b style="color:#f87171">${wCount} (Max 2 allowed)</b></div>
-            <div><span>📐 Window Resizes:</span> <b style="color:#f87171">${rCount} (Max 1 allowed)</b></div>
+            <div><span>🔄 Window / Tab Switches:</span> <b style="color:#f87171">${wCount} (Max ${maxW} allowed)</b></div>
+            <div><span>📐 Window Resizes:</span> <b style="color:#f87171">${rCount} (Max ${maxR} allowed)</b></div>
           </div>
           <p class="muted" style="font-size:12px;margin:-6px 0 18px;color:#fca5a5;opacity:0.9">
             ⚠️ This event has been permanently recorded and flagged for the evaluator.
@@ -938,10 +949,12 @@ function updateIntegrityUi() {
   const chip = $('#quiz-integrity-chip');
   if (chip && quizState) {
     const flags = (quizState.windowChangesCount || 0) + (quizState.windowResizesCount || 0);
+    const maxW = quizState.maxWindowChanges !== undefined ? quizState.maxWindowChanges : 2;
+    const maxR = quizState.maxWindowResizes !== undefined ? quizState.maxWindowResizes : 1;
     if (flags > 0) {
       chip.style.cssText = 'font-size:11.5px;padding:4px 10px;color:#f87171;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.12)';
-      chip.title = `${quizState.windowChangesCount || 0} window/tab changes (max 2), ${quizState.windowResizesCount || 0} resizes (max 1)`;
-      chip.innerHTML = `🚩 Flagged (${quizState.windowChangesCount || 0}/2W · ${quizState.windowResizesCount || 0}/1R)`;
+      chip.title = `${quizState.windowChangesCount || 0} window/tab changes (max ${maxW}), ${quizState.windowResizesCount || 0} resizes (max ${maxR})`;
+      chip.innerHTML = `🚩 Flagged (${quizState.windowChangesCount || 0}/${maxW}W · ${quizState.windowResizesCount || 0}/${maxR}R)`;
     }
   }
 }
@@ -974,10 +987,12 @@ async function syncIntegrityEvent(attemptId, type) {
 
 function renderIntegrityIndicator(s) {
   const flags = (s.windowChangesCount || 0) + (s.windowResizesCount || 0);
+  const maxW = s.maxWindowChanges !== undefined ? s.maxWindowChanges : 2;
+  const maxR = s.maxWindowResizes !== undefined ? s.maxWindowResizes : 1;
   if (flags > 0) {
-    return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:#f87171;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.12)" title="${s.windowChangesCount || 0} window/tab changes (max 2), ${s.windowResizesCount || 0} resizes (max 1)">🚩 Flagged (${s.windowChangesCount || 0}/2W · ${s.windowResizesCount || 0}/1R)</span>`;
+    return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:#f87171;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.12)" title="${s.windowChangesCount || 0} window/tab changes (max ${maxW}), ${s.windowResizesCount || 0} resizes (max ${maxR})">🚩 Flagged (${s.windowChangesCount || 0}/${maxW}W · ${s.windowResizesCount || 0}/${maxR}R)</span>`;
   }
-  return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:var(--green);border-color:rgba(52,211,153,0.35);background:rgba(52,211,153,0.08)" title="Window changes (max 2) and resizes (max 1) are actively monitored"><span class="pulse-dot" style="background:var(--green)"></span> 🛡️ Integrity Active</span>`;
+  return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:var(--green);border-color:rgba(52,211,153,0.35);background:rgba(52,211,153,0.08)" title="Window changes (max ${maxW}) and resizes (max ${maxR}) are actively monitored"><span class="pulse-dot" style="background:var(--green)"></span> 🛡️ Integrity Active</span>`;
 }
 
 function viewQuiz(compId) {
@@ -1014,6 +1029,13 @@ function viewQuiz(compId) {
         if (localAnswers) initialAnswers = JSON.parse(localAnswers);
       } catch {}
 
+      const maxWindowChanges = (data.competition && data.competition.max_window_changes !== undefined && data.competition.max_window_changes !== null)
+        ? Number(data.competition.max_window_changes)
+        : 2;
+      const maxWindowResizes = (data.competition && data.competition.max_window_resizes !== undefined && data.competition.max_window_resizes !== null)
+        ? Number(data.competition.max_window_resizes)
+        : 1;
+
       quizState = {
         compId,
         attempt: data.attempt,
@@ -1024,6 +1046,8 @@ function viewQuiz(compId) {
         answers: initialAnswers,
         testResults: {},
         activeTcTab: {},
+        maxWindowChanges,
+        maxWindowResizes,
         windowChangesCount: initialChanges,
         windowResizesCount: initialResizes,
         isFlagged: initialFlagged,
@@ -1033,14 +1057,14 @@ function viewQuiz(compId) {
         syncIntegrityEvent(data.attempt.id, 'restored');
       }
 
-      if (initialChanges >= 3) {
+      if (initialChanges > maxWindowChanges) {
         renderQuiz();
-        triggerIntegrityAutoSubmit('More than 2 window switch attempts detected. Your test has been automatically submitted.');
+        triggerIntegrityAutoSubmit(`More than ${maxWindowChanges} window switch attempt${maxWindowChanges === 1 ? '' : 's'} detected. Your test has been automatically submitted.`);
         return;
       }
-      if (initialResizes >= 2) {
+      if (initialResizes > maxWindowResizes) {
         renderQuiz();
-        triggerIntegrityAutoSubmit('More than 1 window resize attempt detected. Your test has been automatically submitted.');
+        triggerIntegrityAutoSubmit(`More than ${maxWindowResizes} window resize attempt${maxWindowResizes === 1 ? '' : 's'} detected. Your test has been automatically submitted.`);
         return;
       }
 
@@ -2752,7 +2776,14 @@ function viewAdminNewComp() {
   qbQuestions = [
     { type: 'mcq', prompt: '', options: ['', ''], answer_index: 0, answer: '', starter_code: '', points: 10, language: 'javascript' },
   ];
-  renderCompForm({ title: '', description: '', batch_year: '', starts_at: toLocalInput(new Date(Date.now() + 3600e3)), ends_at: toLocalInput(new Date(Date.now() + 4 * 3600e3)), duration_minutes: 30 }, false);
+  renderCompForm({
+    title: '', description: '', batch_year: '',
+    starts_at: toLocalInput(new Date(Date.now() + 3600e3)),
+    ends_at: toLocalInput(new Date(Date.now() + 4 * 3600e3)),
+    duration_minutes: 30,
+    max_window_changes: 2,
+    max_window_resizes: 1,
+  }, false);
 }
 
 function viewAdminEditComp(id) {
@@ -2774,6 +2805,8 @@ function viewAdminEditComp(id) {
       batch_year: competition.batch_year || '',
       starts_at: toLocalInput(competition.starts_at), ends_at: toLocalInput(competition.ends_at),
       duration_minutes: competition.duration_minutes,
+      max_window_changes: competition.max_window_changes !== undefined && competition.max_window_changes !== null ? competition.max_window_changes : 2,
+      max_window_resizes: competition.max_window_resizes !== undefined && competition.max_window_resizes !== null ? competition.max_window_resizes : 1,
     }, true, competition);
   }).catch((e) => { toast(e.message, 'error'); location.hash = '#/admin'; });
 }
@@ -2803,6 +2836,22 @@ function renderCompForm(c, isEdit, comp = null) {
         <div class="form-row">
           <div class="field"><label>Duration (minutes) <span class="req">*</span></label>
             <input class="input" type="number" id="c-dur" min="1" max="480" value="${c.duration_minutes}" /></div>
+        </div>
+        <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+          <h4 style="margin:0 0 6px;font-size:14px;color:var(--text)">🛡️ Anti-Cheat Integrity Auto-Submit Limits</h4>
+          <p class="muted" style="font-size:12.5px;margin:0 0 12px">Configure how many window switches or resizes a student is allowed before their exam is automatically submitted.</p>
+          <div class="form-row">
+            <div class="field">
+              <label>Allowed Window / Tab Switches <span class="req">*</span></label>
+              <input class="input" type="number" id="c-max-changes" min="0" max="50" value="${c.max_window_changes !== undefined && c.max_window_changes !== null ? c.max_window_changes : 2}" />
+              <span class="faint" style="font-size:11.5px">e.g. 2 means 2 switches allowed; on the 3rd attempt, test auto-submits.</span>
+            </div>
+            <div class="field">
+              <label>Allowed Window Resizes <span class="req">*</span></label>
+              <input class="input" type="number" id="c-max-resizes" min="0" max="50" value="${c.max_window_resizes !== undefined && c.max_window_resizes !== null ? c.max_window_resizes : 1}" />
+              <span class="faint" style="font-size:11.5px">e.g. 1 means 1 resize allowed; on the 2nd attempt, test auto-submits.</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -3283,6 +3332,8 @@ async function saveComp(id) {
     starts_at: startsAt,
     ends_at: endsAt,
     duration_minutes: $('#c-dur').value,
+    max_window_changes: $('#c-max-changes') ? parseInt($('#c-max-changes').value, 10) : 2,
+    max_window_resizes: $('#c-max-resizes') ? parseInt($('#c-max-resizes').value, 10) : 1,
     questions: qbQuestions,
   };
   try {
@@ -3336,16 +3387,17 @@ function router() {
     updateIntegrityUi();
     syncIntegrityEvent(attemptId, 'internal_tab_switch');
 
-    if (quizState.windowChangesCount >= 3) {
-      triggerIntegrityAutoSubmit('More than 2 window switch attempts detected. Your test has been automatically submitted.');
+    const maxChanges = (quizState && quizState.maxWindowChanges !== undefined) ? quizState.maxWindowChanges : 2;
+    if (quizState.windowChangesCount > maxChanges) {
+      triggerIntegrityAutoSubmit(`More than ${maxChanges} window switch attempt${maxChanges === 1 ? '' : 's'} detected. Your test has been automatically submitted.`);
       return;
     }
 
-    const warnMsg = quizState.windowChangesCount === 2
-      ? '⚠️ FINAL WARNING: 2 tab switch attempts recorded! On the next attempt, your exam will be automatically submitted.'
-      : 'Leaving the competition screen to browse other tabs or pages (Leaderboards, Competitions, etc.) is strictly prohibited! (1 of 2 allowed).';
+    const warnMsg = quizState.windowChangesCount === maxChanges
+      ? `⚠️ FINAL WARNING: ${quizState.windowChangesCount} tab switch attempts recorded! On the next attempt, your exam will be automatically submitted.`
+      : `Leaving the competition screen to browse other tabs or pages (Leaderboards, Competitions, etc.) is strictly prohibited! (${quizState.windowChangesCount} of ${maxChanges} allowed).`;
     showIntegrityWarningModal(warnMsg);
-    securityNotice(`⚠️ Navigation violation detected! (Count: ${quizState.windowChangesCount}/2). Your attempt is marked as FLAGGED for evaluation.`);
+    securityNotice(`⚠️ Navigation violation detected! (Count: ${quizState.windowChangesCount}/${maxChanges}). Your attempt is marked as FLAGGED for evaluation.`);
     history.replaceState(null, '', `#/quiz/${currentQuizCompId}`);
     return;
   }

@@ -750,7 +750,14 @@ app.post('/api/competitions/:id/start', requireAuth, requireProfile, async (req,
       is_flagged: attempt.is_flagged ? 1 : 0,
       flag_reason: attempt.flag_reason || null,
     },
-    competition: { id: comp.id, title: comp.title, duration_minutes: comp.duration_minutes, ends_at: comp.ends_at },
+    competition: {
+      id: comp.id,
+      title: comp.title,
+      duration_minutes: comp.duration_minutes,
+      ends_at: comp.ends_at,
+      max_window_changes: comp.max_window_changes !== undefined && comp.max_window_changes !== null ? comp.max_window_changes : 2,
+      max_window_resizes: comp.max_window_resizes !== undefined && comp.max_window_resizes !== null ? comp.max_window_resizes : 1,
+    },
     questions: questions.map((q) => ({
       id: q.id,
       type: q.type,
@@ -857,11 +864,13 @@ async function gradeAttempt(attemptId, answers, autoSubmit = false, integrity = 
   const currentResizes = attempt.window_resizes_count || 0;
   const finalChanges = Math.max(currentChanges, clientChanges);
   const finalResizes = Math.max(currentResizes, clientResizes);
+  const maxChanges = comp && comp.max_window_changes !== undefined && comp.max_window_changes !== null ? comp.max_window_changes : 2;
+  const maxResizes = comp && comp.max_window_resizes !== undefined && comp.max_window_resizes !== null ? comp.max_window_resizes : 1;
   const isFlagged = (finalChanges > 0 || finalResizes > 0) ? 1 : 0;
   const reasons = [];
   if (finalChanges > 0) reasons.push(`${finalChanges} window/tab switch${finalChanges === 1 ? '' : 'es'}`);
   if (finalResizes > 0) reasons.push(`${finalResizes} window resize${finalResizes === 1 ? '' : 's'}`);
-  if (finalChanges >= 3 || finalResizes >= 2) reasons.push('Auto-submitted due to limit violation');
+  if (finalChanges > maxChanges || finalResizes > maxResizes) reasons.push('Auto-submitted due to limit violation');
   const flagReason = reasons.length > 0 ? reasons.join(', ') : null;
 
   await db.prepare(`
@@ -916,7 +925,12 @@ app.post('/api/attempts/:id/submit', requireAuth, async (req, res) => {
 /* Real-time integrity event logging (window blur/visibility change/resize) */
 app.post('/api/attempts/:id/integrity-event', requireAuth, async (req, res) => {
   const attemptId = parseInt(req.params.id, 10);
-  const attempt = await db.prepare('SELECT * FROM attempts WHERE id = ?').get(attemptId);
+  const attempt = await db.prepare(`
+    SELECT a.*, c.max_window_changes, c.max_window_resizes
+    FROM attempts a
+    JOIN competitions c ON c.id = a.competition_id
+    WHERE a.id = ?
+  `).get(attemptId);
   if (!attempt) return res.status(404).json({ error: 'Attempt not found.' });
   if (attempt.user_id !== req.user.id) return res.status(403).json({ error: 'Not your attempt.' });
   if (attempt.status === 'submitted') return res.json({ ok: false, message: 'Attempt already submitted.' });
@@ -926,11 +940,13 @@ app.post('/api/attempts/:id/integrity-event', requireAuth, async (req, res) => {
   const currentResizes = attempt.window_resizes_count || 0;
   const finalChanges = Math.max(currentChanges, parseInt(window_changes_count, 10) || 0);
   const finalResizes = Math.max(currentResizes, parseInt(window_resizes_count, 10) || 0);
+  const maxChanges = attempt.max_window_changes !== undefined && attempt.max_window_changes !== null ? attempt.max_window_changes : 2;
+  const maxResizes = attempt.max_window_resizes !== undefined && attempt.max_window_resizes !== null ? attempt.max_window_resizes : 1;
   const isFlagged = (finalChanges > 0 || finalResizes > 0) ? 1 : 0;
   const reasons = [];
   if (finalChanges > 0) reasons.push(`${finalChanges} window/tab switch${finalChanges === 1 ? '' : 'es'}`);
   if (finalResizes > 0) reasons.push(`${finalResizes} window resize${finalResizes === 1 ? '' : 's'}`);
-  if (finalChanges >= 3 || finalResizes >= 2) reasons.push('Auto-submitted due to limit violation');
+  if (finalChanges > maxChanges || finalResizes > maxResizes) reasons.push('Auto-submitted due to limit violation');
   const flagReason = reasons.length > 0 ? reasons.join(', ') : null;
 
   await db.prepare(`
@@ -1073,12 +1089,27 @@ function validateCompetitionPayload(b) {
   const startsAt = b.starts_at ? new Date(b.starts_at) : null;
   const endsAt = b.ends_at ? new Date(b.ends_at) : null;
   const duration = parseInt(b.duration_minutes, 10);
+  const maxWindowChanges = b.max_window_changes !== undefined && b.max_window_changes !== null && b.max_window_changes !== ''
+    ? Math.max(0, parseInt(b.max_window_changes, 10) || 0)
+    : 2;
+  const maxWindowResizes = b.max_window_resizes !== undefined && b.max_window_resizes !== null && b.max_window_resizes !== ''
+    ? Math.max(0, parseInt(b.max_window_resizes, 10) || 0)
+    : 1;
   if (!title) return { error: 'Competition title is required.' };
   if (!startsAt || isNaN(startsAt.getTime())) return { error: 'Valid start date/time is required.' };
   if (!endsAt || isNaN(endsAt.getTime())) return { error: 'Valid end date/time is required.' };
   if (endsAt.getTime() <= startsAt.getTime()) return { error: 'End time must be after start time.' };
   if (!Number.isFinite(duration) || duration < 1 || duration > 480) return { error: 'Duration must be between 1 and 480 minutes.' };
-  return { title, description, batch_year: batchYear || null, starts_at: startsAt.toISOString(), ends_at: endsAt.toISOString(), duration_minutes: duration };
+  return {
+    title,
+    description,
+    batch_year: batchYear || null,
+    starts_at: startsAt.toISOString(),
+    ends_at: endsAt.toISOString(),
+    duration_minutes: duration,
+    max_window_changes: maxWindowChanges,
+    max_window_resizes: maxWindowResizes,
+  };
 }
 
 function validateQuestions(list) {
@@ -1141,9 +1172,9 @@ app.post('/api/admin/competitions', requireAuth, requireAdmin, async (req, res) 
   if (qv.error) return res.status(400).json({ error: qv.error });
 
   const r = await db.prepare(`
-    INSERT INTO competitions (title, description, batch_year, starts_at, ends_at, duration_minutes, created_by, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(v.title, v.description, v.batch_year, v.starts_at, v.ends_at, v.duration_minutes, req.user.id, new Date().toISOString());
+    INSERT INTO competitions (title, description, batch_year, starts_at, ends_at, duration_minutes, max_window_changes, max_window_resizes, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(v.title, v.description, v.batch_year, v.starts_at, v.ends_at, v.duration_minutes, v.max_window_changes, v.max_window_resizes, req.user.id, new Date().toISOString());
   const id = r.lastInsertRowid;
   const ins = db.prepare(`
     INSERT INTO questions (competition_id, type, prompt, options_json, answer, starter_code, points, sort_order, language, test_cases_json)
@@ -1204,8 +1235,8 @@ app.put('/api/admin/competitions/:id', requireAuth, requireAdmin, async (req, re
   if (!comp) return res.status(404).json({ error: 'Competition not found.' });
   const v = validateCompetitionPayload({ ...comp, ...(req.body || {}) });
   if (v.error) return res.status(400).json({ error: v.error });
-  await db.prepare('UPDATE competitions SET title = ?, description = ?, batch_year = ?, starts_at = ?, ends_at = ?, duration_minutes = ? WHERE id = ?')
-    .run(v.title, v.description, v.batch_year, v.starts_at, v.ends_at, v.duration_minutes, comp.id);
+  await db.prepare('UPDATE competitions SET title = ?, description = ?, batch_year = ?, starts_at = ?, ends_at = ?, duration_minutes = ?, max_window_changes = ?, max_window_resizes = ? WHERE id = ?')
+    .run(v.title, v.description, v.batch_year, v.starts_at, v.ends_at, v.duration_minutes, v.max_window_changes, v.max_window_resizes, comp.id);
 
   const hasAttempts = (await db.prepare('SELECT COUNT(*) AS n FROM attempts WHERE competition_id = ?').get(comp.id)).n > 0;
   if (!hasAttempts && req.body.questions) {
