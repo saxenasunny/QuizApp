@@ -124,11 +124,15 @@ function verifyAndSyncCode(qid) {
     quizState.windowChangesCount = (quizState.windowChangesCount || 0) + 1;
     if (quizState.attempt && quizState.attempt.id) persistIntegrityLocal(quizState.attempt.id);
     updateIntegrityUi();
-    showIntegrityWarningModal('Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
-    securityNotice('⚠️ Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
     if (quizState.attempt && quizState.attempt.id) {
       syncIntegrityEvent(quizState.attempt.id, 'inspector_tamper');
     }
+    if (quizState.windowChangesCount >= 3) {
+      triggerIntegrityAutoSubmit('More than 2 window switch / tampering attempts detected. Your test has been automatically submitted.');
+      return false;
+    }
+    showIntegrityWarningModal('Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
+    securityNotice('⚠️ Direct DOM/Inspector modification detected! Pasting code via developer tools is strictly prohibited.');
     return false;
   }
   // Ensure quizState answer strictly matches verified lastCodeValue
@@ -272,8 +276,17 @@ async function logout() {
     persistIntegrityLocal(attemptId);
     updateIntegrityUi();
     syncIntegrityEvent(attemptId, 'internal_tab_switch');
-    showIntegrityWarningModal('You cannot log out during an active exam! Leaving the competition is strictly prohibited and your attempt has been marked as FLAGGED.');
-    securityNotice(`⚠️ Navigation violation detected! Attempting to log out during an active competition is prohibited. (Count: ${quizState.windowChangesCount}).`);
+
+    if (quizState.windowChangesCount >= 3) {
+      triggerIntegrityAutoSubmit('More than 2 window switch attempts detected. Your test has been automatically submitted.');
+      return;
+    }
+
+    const warnMsg = quizState.windowChangesCount === 2
+      ? '⚠️ FINAL WARNING: 2 tab switch attempts recorded! On the next attempt, your exam will be automatically submitted.'
+      : 'You cannot log out during an active exam! Leaving the competition is strictly prohibited and your attempt has been marked as FLAGGED. (1 of 2 allowed)';
+    showIntegrityWarningModal(warnMsg);
+    securityNotice(`⚠️ Navigation violation detected! Attempting to log out during an active competition is prohibited. (Count: ${quizState.windowChangesCount}/2).`);
     return;
   }
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
@@ -710,9 +723,18 @@ function startQuizIntegrityMonitoring(attemptId) {
     quizState.isFlagged = true;
     persistIntegrityLocal(attemptId);
     updateIntegrityUi();
-    showIntegrityWarningModal('Window / tab switch detected! Leaving or unfocusing the exam window is strictly prohibited.');
-    securityNotice(`⚠️ Window / tab switch detected! (Count: ${quizState.windowChangesCount}). Your attempt is marked as FLAGGED for evaluation.`);
     syncIntegrityEvent(attemptId, 'window_change');
+
+    if (quizState.windowChangesCount >= 3) {
+      triggerIntegrityAutoSubmit('More than 2 window switch attempts detected. Your test has been automatically submitted.');
+      return;
+    }
+
+    const warnMsg = quizState.windowChangesCount === 2
+      ? '⚠️ FINAL WARNING: 2 window/tab switches recorded! On the next attempt, your exam will be automatically submitted.'
+      : 'Window / tab switch detected (1 of 2 allowed)! Leaving or unfocusing the exam window is strictly prohibited.';
+    showIntegrityWarningModal(warnMsg);
+    securityNotice(`⚠️ Window / tab switch detected! (Count: ${quizState.windowChangesCount}/2). Your attempt is marked as FLAGGED for evaluation.`);
   };
 
   const onVisibilityChange = () => {
@@ -751,9 +773,15 @@ function startQuizIntegrityMonitoring(attemptId) {
     quizState.isFlagged = true;
     persistIntegrityLocal(attemptId);
     updateIntegrityUi();
-    showIntegrityWarningModal('Window resize detected! Resizing or split-screening the browser during the exam is strictly prohibited.');
-    securityNotice(`⚠️ Window resize detected! (Count: ${quizState.windowResizesCount}). Your attempt is marked as FLAGGED for evaluation.`);
     syncIntegrityEvent(attemptId, 'window_resize');
+
+    if (quizState.windowResizesCount >= 2) {
+      triggerIntegrityAutoSubmit('More than 1 window resize attempt detected. Your test has been automatically submitted.');
+      return;
+    }
+
+    showIntegrityWarningModal('⚠️ FINAL WARNING: Window resize detected (1 of 1 allowed)! On the next resize attempt, your exam will be automatically submitted.');
+    securityNotice(`⚠️ Window resize detected! (Count: ${quizState.windowResizesCount}/1). Your attempt is marked as FLAGGED for evaluation.`);
   };
 
   document.addEventListener('visibilitychange', onVisibilityChange);
@@ -787,8 +815,8 @@ function showIntegrityWarningModal(reason = 'Suspicious window activity detected
           Switching tabs, minimizing the browser, or resizing the window during this competition is strictly prohibited.
         </p>
         <div class="integrity-warn-stats">
-          <div><span>🔄 Window / Tab Switches:</span> <b style="color:#f87171">${wCount}</b></div>
-          <div><span>📐 Window Resizes:</span> <b style="color:#f87171">${rCount}</b></div>
+          <div><span>🔄 Window / Tab Switches:</span> <b style="color:#f87171">${wCount} / 2 allowed</b></div>
+          <div><span>📐 Window Resizes:</span> <b style="color:#f87171">${rCount} / 1 allowed</b></div>
         </div>
         <p class="muted" style="font-size:12px;margin:-6px 0 18px;color:#fca5a5;opacity:0.9">
           ⚠️ This event has been permanently recorded and will be reviewed by the evaluator during assessment.
@@ -804,14 +832,116 @@ function showIntegrityWarningModal(reason = 'Suspicious window activity detected
   }, 50);
 }
 
+window._finishIntegrityAutoSubmit = async function(attemptId) {
+  const btn = $('#integrity-autosubmit-ok-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Opening result…';
+  }
+  if (window._integritySubmitPromise) {
+    try { await window._integritySubmitPromise; } catch {}
+  }
+  closeModal();
+  location.hash = `#/result/${attemptId}`;
+};
+
+async function triggerIntegrityAutoSubmit(reason = 'Violation limit exceeded. Test automatically submitted.') {
+  if (!quizState || quizState.isSubmitting) return;
+  quizState.isSubmitting = true;
+  saveCurrentCode();
+
+  if (integrityCleanupFn) {
+    integrityCleanupFn();
+    integrityCleanupFn = null;
+  }
+  if (window._editorIntegrityInterval) {
+    clearInterval(window._editorIntegrityInterval);
+    window._editorIntegrityInterval = null;
+  }
+  if (window._codeEditorObserver) {
+    window._codeEditorObserver.disconnect();
+    window._codeEditorObserver = null;
+  }
+  if (quizTimer) {
+    clearInterval(quizTimer);
+    quizTimer = null;
+  }
+  if (quizCooldownTimer) {
+    clearInterval(quizCooldownTimer);
+    quizCooldownTimer = null;
+    quizRunCooldownUntil = 0;
+  }
+
+  const s = quizState;
+  const attemptId = s.attempt.id;
+  const integrityPayload = {
+    window_changes_count: s.windowChangesCount || 0,
+    window_resizes_count: s.windowResizesCount || 0,
+  };
+  const wCount = s.windowChangesCount || 0;
+  const rCount = s.windowResizesCount || 0;
+
+  const root = $('#modal-root');
+  if (root) {
+    root.innerHTML = `
+      <div class="modal-backdrop" style="background:rgba(15,3,6,0.92);backdrop-filter:blur(8px)">
+        <div class="modal-card modal-danger" role="dialog" aria-modal="true" aria-labelledby="integrity-modal-title">
+          <div class="integrity-warn-icon">🛑</div>
+          <h2 class="integrity-warn-title" id="integrity-modal-title">⚠️ EXAM AUTO-SUBMITTED</h2>
+          <div style="display:inline-block;background:rgba(239,68,68,0.25);color:#fca5a5;border:1px solid rgba(239,68,68,0.5);font-size:12px;font-weight:800;letter-spacing:0.8px;padding:3px 12px;border-radius:999px;margin-bottom:14px">
+            INTEGRITY LIMIT EXCEEDED · AUTO-SUBMITTED
+          </div>
+          <p class="integrity-warn-body">
+            <b style="color:#fca5a5;font-size:14px">${esc(reason)}</b><br/><br/>
+            You have exceeded the maximum allowed activity limit (maximum 2 window switches or 1 window resize). Your answers have been automatically finalized and submitted for evaluation.
+          </p>
+          <div class="integrity-warn-stats">
+            <div><span>🔄 Window / Tab Switches:</span> <b style="color:#f87171">${wCount} (Max 2 allowed)</b></div>
+            <div><span>📐 Window Resizes:</span> <b style="color:#f87171">${rCount} (Max 1 allowed)</b></div>
+          </div>
+          <p class="muted" style="font-size:12px;margin:-6px 0 18px;color:#fca5a5;opacity:0.9">
+            ⚠️ This event has been permanently recorded and flagged for the evaluator.
+          </p>
+          <button class="btn-danger-confirm" id="integrity-autosubmit-ok-btn" type="button" onclick="window._finishIntegrityAutoSubmit(${attemptId})">
+            OK — View Result
+          </button>
+        </div>
+      </div>`;
+    setTimeout(() => {
+      const btn = $('#integrity-autosubmit-ok-btn');
+      if (btn) btn.focus();
+    }, 50);
+  }
+
+  securityNotice(`🛑 ${reason}`);
+  toast(reason, 'error');
+
+  window._integritySubmitPromise = (async () => {
+    try {
+      await api(`/api/attempts/${attemptId}/submit`, {
+        method: 'POST',
+        body: { answers: s.answers, integrity: integrityPayload }
+      });
+      try {
+        localStorage.removeItem(`quiz_integrity_${attemptId}`);
+        localStorage.removeItem(`quiz_answers_${attemptId}`);
+      } catch {}
+    } catch (e) {
+      console.error('Auto-submit error:', e);
+    } finally {
+      quizState = null;
+    }
+  })();
+}
+
 function updateIntegrityUi() {
   const chip = $('#quiz-integrity-chip');
   if (chip && quizState) {
     const flags = (quizState.windowChangesCount || 0) + (quizState.windowResizesCount || 0);
     if (flags > 0) {
       chip.style.cssText = 'font-size:11.5px;padding:4px 10px;color:#f87171;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.12)';
-      chip.title = `${quizState.windowChangesCount || 0} window/tab changes, ${quizState.windowResizesCount || 0} resizes recorded`;
-      chip.innerHTML = `🚩 Flagged (${quizState.windowChangesCount || 0}W / ${quizState.windowResizesCount || 0}R)`;
+      chip.title = `${quizState.windowChangesCount || 0} window/tab changes (max 2), ${quizState.windowResizesCount || 0} resizes (max 1)`;
+      chip.innerHTML = `🚩 Flagged (${quizState.windowChangesCount || 0}/2W · ${quizState.windowResizesCount || 0}/1R)`;
     }
   }
 }
@@ -845,9 +975,9 @@ async function syncIntegrityEvent(attemptId, type) {
 function renderIntegrityIndicator(s) {
   const flags = (s.windowChangesCount || 0) + (s.windowResizesCount || 0);
   if (flags > 0) {
-    return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:#f87171;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.12)" title="${s.windowChangesCount || 0} window/tab changes, ${s.windowResizesCount || 0} resizes recorded">🚩 Flagged (${s.windowChangesCount || 0}W / ${s.windowResizesCount || 0}R)</span>`;
+    return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:#f87171;border-color:rgba(248,113,113,0.4);background:rgba(248,113,113,0.12)" title="${s.windowChangesCount || 0} window/tab changes (max 2), ${s.windowResizesCount || 0} resizes (max 1)">🚩 Flagged (${s.windowChangesCount || 0}/2W · ${s.windowResizesCount || 0}/1R)</span>`;
   }
-  return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:var(--green);border-color:rgba(52,211,153,0.35);background:rgba(52,211,153,0.08)" title="Window changes and resizes are actively monitored"><span class="pulse-dot" style="background:var(--green)"></span> 🛡️ Integrity Active</span>`;
+  return `<span class="chip" id="quiz-integrity-chip" style="font-size:11.5px;padding:4px 10px;color:var(--green);border-color:rgba(52,211,153,0.35);background:rgba(52,211,153,0.08)" title="Window changes (max 2) and resizes (max 1) are actively monitored"><span class="pulse-dot" style="background:var(--green)"></span> 🛡️ Integrity Active</span>`;
 }
 
 function viewQuiz(compId) {
@@ -902,6 +1032,18 @@ function viewQuiz(compId) {
       if (initialChanges > sChanges || initialResizes > sResizes) {
         syncIntegrityEvent(data.attempt.id, 'restored');
       }
+
+      if (initialChanges >= 3) {
+        renderQuiz();
+        triggerIntegrityAutoSubmit('More than 2 window switch attempts detected. Your test has been automatically submitted.');
+        return;
+      }
+      if (initialResizes >= 2) {
+        renderQuiz();
+        triggerIntegrityAutoSubmit('More than 1 window resize attempt detected. Your test has been automatically submitted.');
+        return;
+      }
+
       startQuizIntegrityMonitoring(data.attempt.id);
       renderQuiz();
       if (quizTimer) clearInterval(quizTimer);
@@ -3193,8 +3335,17 @@ function router() {
     persistIntegrityLocal(attemptId);
     updateIntegrityUi();
     syncIntegrityEvent(attemptId, 'internal_tab_switch');
-    showIntegrityWarningModal('Leaving the competition screen to browse other tabs or pages (Leaderboards, Competitions, etc.) is strictly prohibited! Your attempt has been marked as FLAGGED.');
-    securityNotice(`⚠️ Navigation violation detected! (Count: ${quizState.windowChangesCount}). Your attempt is marked as FLAGGED for evaluation.`);
+
+    if (quizState.windowChangesCount >= 3) {
+      triggerIntegrityAutoSubmit('More than 2 window switch attempts detected. Your test has been automatically submitted.');
+      return;
+    }
+
+    const warnMsg = quizState.windowChangesCount === 2
+      ? '⚠️ FINAL WARNING: 2 tab switch attempts recorded! On the next attempt, your exam will be automatically submitted.'
+      : 'Leaving the competition screen to browse other tabs or pages (Leaderboards, Competitions, etc.) is strictly prohibited! (1 of 2 allowed).';
+    showIntegrityWarningModal(warnMsg);
+    securityNotice(`⚠️ Navigation violation detected! (Count: ${quizState.windowChangesCount}/2). Your attempt is marked as FLAGGED for evaluation.`);
     history.replaceState(null, '', `#/quiz/${currentQuizCompId}`);
     return;
   }

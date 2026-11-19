@@ -861,6 +861,7 @@ async function gradeAttempt(attemptId, answers, autoSubmit = false, integrity = 
   const reasons = [];
   if (finalChanges > 0) reasons.push(`${finalChanges} window/tab switch${finalChanges === 1 ? '' : 'es'}`);
   if (finalResizes > 0) reasons.push(`${finalResizes} window resize${finalResizes === 1 ? '' : 's'}`);
+  if (finalChanges >= 3 || finalResizes >= 2) reasons.push('Auto-submitted due to limit violation');
   const flagReason = reasons.length > 0 ? reasons.join(', ') : null;
 
   await db.prepare(`
@@ -929,6 +930,7 @@ app.post('/api/attempts/:id/integrity-event', requireAuth, async (req, res) => {
   const reasons = [];
   if (finalChanges > 0) reasons.push(`${finalChanges} window/tab switch${finalChanges === 1 ? '' : 'es'}`);
   if (finalResizes > 0) reasons.push(`${finalResizes} window resize${finalResizes === 1 ? '' : 's'}`);
+  if (finalChanges >= 3 || finalResizes >= 2) reasons.push('Auto-submitted due to limit violation');
   const flagReason = reasons.length > 0 ? reasons.join(', ') : null;
 
   await db.prepare(`
